@@ -1,7 +1,6 @@
 export const W = 320;
 export const H = 180;
 export const HORIZON = 104;
-export const ROD_TIP = { x: 118, y: 74 };
 
 type RGB = [number, number, number];
 const hex = (h: string): RGB => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
@@ -33,6 +32,13 @@ const hash = (n: number) => {
   return x - Math.floor(x);
 };
 
+export function mountainLineY(x: number, t: number) {
+  const farX = x + t * 0.3, nearX = x + t * 0.8;
+  const farY = 62 + Math.sin(farX * 0.03) * 10 + Math.sin(farX * 0.071 + 1) * 6 + Math.sin(farX * 0.013) * 8;
+  const nearY = 80 + Math.sin(nearX * 0.045 + 2) * 6 + Math.sin(nearX * 0.11) * 3;
+  return Math.min(farY, nearY);
+}
+
 export interface SceneState {
   t: number;
   phase: string;
@@ -55,7 +61,6 @@ export interface SceneState {
   birdDir?: number;
   birdY?: number;
   meteorT?: number;
-  meteorDuration?: number;
   meteorX?: number;
   meteorY?: number;
 }
@@ -74,6 +79,16 @@ function line(ctx: CanvasRenderingContext2D, c: string, x0: number, y0: number, 
   }
 }
 
+function lineAboveRidge(ctx: CanvasRenderingContext2D, c: string, x0: number, y0: number, x1: number, y1: number, ridgeAt: (x: number) => number) {
+  const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0)) | 0;
+  ctx.fillStyle = c;
+  for (let k = 0; k <= n; k++) {
+    const u = n ? k / n : 0;
+    const x = Math.round(x0 + (x1 - x0) * u), y = Math.round(y0 + (y1 - y0) * u);
+    if (y < ridgeAt(x)) ctx.fillRect(x, y, 1, 1);
+  }
+}
+
 export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
   const { t } = st;
   const d = dayInfo(t);
@@ -84,34 +99,17 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     ctx.fillStyle = css(mix(top, bot, b / (bands - 1)));
     ctx.fillRect(0, Math.floor((b * HORIZON) / bands), W, Math.ceil(HORIZON / bands) + 1);
   }
-  const ridgeAt = (x: number) => {
-    const farX = x + t * 0.3, nearX = x + t * 0.8;
-    const farY = 62 + Math.sin(farX * 0.03) * 10 + Math.sin(farX * 0.071 + 1) * 6 + Math.sin(farX * 0.013) * 8;
-    const nearY = 80 + Math.sin(nearX * 0.045 + 2) * 6 + Math.sin(nearX * 0.11) * 3;
-    return Math.min(farY, nearY);
-  };
-  // stars
+  const ridgeAt = (x: number) => mountainLineY(x, t);
+
+  // Stars fade smoothly instead of switching between static visibility states.
   const night = d.i === 3 ? 1 - d.s : d.j === 3 ? d.s : 0;
+  const starTwinkle = (k: number) => 0.12 + 0.88 * (0.5 + 0.5 * Math.sin(t * (0.9 + hash(k + 333) * 1.4) + hash(k + 444) * Math.PI * 2));
   if (night > 0.05) {
     for (let k = 0; k < 40; k++) {
-      if (hash(k + Math.floor(t * 0.7 + k)) > 0.15 * night + 0.85 - night) continue;
       const starX = hash(k) * W, starY = hash(k + 50) * 60;
-      if (starY < ridgeAt(starX)) px(ctx, `rgba(255,244,214,${night})`, starX, starY);
-
+      const alpha = night * starTwinkle(k);
+      if (starY < ridgeAt(starX)) px(ctx, `rgba(255,244,214,${alpha})`, starX, starY);
     }
-  }
-  // A few slow, broken clouds drift behind the ridgeline in every weather.
-  for (let i = 0; i < 3; i++) {
-    const width = 23 + hash(i + 1700) * 25;
-    const x = ((hash(i + 1750) * (W + width) + t * (1.1 + i * 0.25)) % (W + width)) - width;
-    const y = 17 + hash(i + 1800) * 27;
-    const cloud = d.isNight ? "rgba(25,37,59,0.68)" : "rgba(235,242,231,0.56)";
-    const cloudShade = d.isNight ? "rgba(17,27,45,0.4)" : "rgba(180,200,201,0.23)";
-    px(ctx, cloudShade, x + 2, y + 5, width, 2);
-    px(ctx, cloud, x + 4, y + 2, width - 8, 3);
-    px(ctx, cloud, x, y + 4, width, 3);
-    px(ctx, cloud, x + 6, y, 9, 4);
-    px(ctx, cloud, x + width * 0.55, y + 1, 11, 3);
   }
 
   // Distant birds fly as either a lone silhouette or a separated flock.
@@ -132,17 +130,15 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
   }
 
   if ((st.meteorT ?? -1) >= 0 && d.isNight && !st.rain) {
-    const duration = Math.max(0.3, st.meteorDuration ?? 0.75);
-    const u = Math.max(0, Math.min(1, (st.meteorT ?? 0) / duration));
+    const elapsed = st.meteorT ?? 0;
     const sx0 = st.meteorX ?? 190, sy0 = st.meteorY ?? 15;
-    const meteorX = sx0 + u * 30, meteorY = sy0 + u * 18;
-    if (meteorY < ridgeAt(meteorX)) {
-      line(ctx, `rgba(255,247,224,${0.9 * (1 - u * 0.35)})`, meteorX - 9, meteorY - 5, meteorX, meteorY);
-      px(ctx, "rgba(255,255,243,0.95)", meteorX, meteorY);
-    }
+    const meteorX = sx0 + elapsed * 32, meteorY = sy0 + elapsed * 36;
+    const glow = Math.max(0.32, 0.95 - elapsed * 0.18);
+    lineAboveRidge(ctx, `rgba(255,247,224,${glow * 0.8})`, meteorX - 10, meteorY - 7, meteorX, meteorY, ridgeAt);
+    if (meteorY < ridgeAt(meteorX)) px(ctx, `rgba(255,255,243,${glow})`, meteorX, meteorY);
   }
 
-  // sun / moon arc
+  // The sun or moon is painted into the sky first, so ridges and clouds cover it naturally.
   const ang = ((t % CYCLE) / CYCLE) * Math.PI * 2;
   const sx = W / 2 - Math.cos(ang) * 130, sy = 70 - Math.sin(ang + 0.3) * 50;
   const moon = d.phase > 2.5 && d.phase < 3.95;
@@ -182,6 +178,20 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     }
   }
   ctx.fillRect(0, HORIZON - 2, W, 2);
+
+  // A few drifting clouds sit in front of the mountain layer and can veil the sun.
+  for (let i = 0; i < 3; i++) {
+    const width = 23 + hash(i + 1700) * 25;
+    const x = ((hash(i + 1750) * (W + width) + t * (1.1 + i * 0.25)) % (W + width)) - width;
+    const y = 25 + hash(i + 1800) * 27;
+    const cloud = d.isNight ? "rgba(25,37,59,0.72)" : "rgba(235,242,231,0.6)";
+    const cloudShade = d.isNight ? "rgba(17,27,45,0.46)" : "rgba(180,200,201,0.28)";
+    px(ctx, cloudShade, x + 2, y + 5, width, 2);
+    px(ctx, cloud, x + 4, y + 2, width - 8, 3);
+    px(ctx, cloud, x, y + 4, width, 3);
+    px(ctx, cloud, x + 6, y, 9, 4);
+    px(ctx, cloud, x + width * 0.55, y + 1, 11, 3);
+  }
 
   // water
   const wTop = pick(WATER, d), wBot = pick(WATER_DEEP, d);
@@ -227,26 +237,22 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     if (x % 6 === 0) px(ctx, d.isNight ? "rgba(28,44,59,0.18)" : "rgba(31,62,59,0.13)", x - shimmer, HORIZON + 3 + hash(x + 1880) * 7, 2, 2 + hash(x + 1900) * 5);
   }
 
-  // Night points and a shooting star shimmer softly below the waterline.
+  // Each star reflection follows the same soft pulse as its point in the sky.
   if (night > 0.05) {
     for (let k = 0; k < 40; k++) {
-      if (hash(k + Math.floor(t * 0.7 + k)) > 0.15 * night + 0.85 - night) continue;
       const starX = hash(k) * W, starY = hash(k + 50) * 60;
       if (starY < ridgeAt(starX)) {
         const rx = starX + Math.sin(t * 1.7 + k) * 2;
         const ry = HORIZON + Math.min(35, (HORIZON - starY) * 0.34);
-        px(ctx, `rgba(220,231,245,${night * 0.16})`, rx, ry, 2, 1);
+        px(ctx, `rgba(220,231,245,${night * starTwinkle(k) * 0.16})`, rx, ry, 2, 1);
       }
     }
   }
   if ((st.meteorT ?? -1) >= 0 && d.isNight && !st.rain) {
-    const duration = Math.max(0.3, st.meteorDuration ?? 0.75);
-    const u = Math.max(0, Math.min(1, (st.meteorT ?? 0) / duration));
+    const elapsed = st.meteorT ?? 0;
     const sx0 = st.meteorX ?? 190, sy0 = st.meteorY ?? 15;
-    const mx0 = sx0 + u * 30, my0 = sy0 + u * 18;
+    const mx0 = sx0 + elapsed * 32, my0 = sy0 + elapsed * 36;
     if (my0 < ridgeAt(mx0)) {
-      line(ctx, `rgba(255,246,217,${0.85 * (1 - u * 0.35)})`, mx0 - 9, my0 - 5, mx0, my0);
-      px(ctx, "rgba(255,255,235,0.9)", mx0, my0);
       const reflectedX = mx0 + Math.sin(t * 2) * 2;
       const reflectedY = HORIZON + Math.min(38, (HORIZON - my0) * 0.34);
       line(ctx, "rgba(220,232,245,0.13)", reflectedX - 5, reflectedY + 1, reflectedX + 4, reflectedY + 4);
@@ -275,24 +281,25 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     }
   }
   // boat
-  const by = 100 + Math.round(Math.sin(t * 1.4) * 1);
+  const by = 130 + Math.round(Math.sin(t * 1.4) * 1);
   const bx = 70;
   const hull = ["#6b3f22", "#7d4a28", "#5a331b", "#3f2413"];
-  const ax = bx + 30, ay = by;
+  const ax = bx + 30, ay = by, waterline = by + 4;
+  const rodTipX = ax + 18, rodTipY = ay - 26;
   ctx.save();
   ctx.beginPath(); ctx.rect(0, HORIZON, W, H - HORIZON); ctx.clip();
   ctx.globalAlpha = 0.3;
-  for (let r = 0; r < 8; r++) {
+  for (let r = 0; r < 4; r++) {
     const inset = Math.floor(r * r * 0.18);
-    const reflectedY = 2 * HORIZON - (by + 8 - r);
+    const reflectedY = 2 * waterline - (by + r);
     px(ctx, hull[r % 4 === 0 ? 3 : r % 2 ? 1 : 0]!, bx + inset + Math.sin(t * 2 + r) * 2, reflectedY, 60 - inset * 2, 1);
   }
   // The seated angler is recognizable in the broken mirror of the lake.
-  px(ctx, "#18333a", ax - 4, 2 * HORIZON - (ay - 10), 9, 8);
-  px(ctx, "#223b43", ax - 4, 2 * HORIZON - (ay - 15), 7, 5);
-  px(ctx, "#2d3b46", ax - 4, 2 * HORIZON - (ay - 17), 10, 2);
-  px(ctx, "#26303b", ax - 2, 2 * HORIZON - (ay - 19), 6, 2);
-  for (let r = 0; r < 4; r++) px(ctx, "rgba(22,31,41,0.7)", bx + 5 + r * 2 + Math.sin(t * 2.6 + r) * 2, HORIZON + 12 + r * 3, 50 - r * 4, 1);
+  px(ctx, "#18333a", ax - 4, 2 * waterline - (ay - 10), 9, 8);
+  px(ctx, "#223b43", ax - 4, 2 * waterline - (ay - 15), 7, 5);
+  px(ctx, "#2d3b46", ax - 4, 2 * waterline - (ay - 17), 10, 2);
+  px(ctx, "#26303b", ax - 2, 2 * waterline - (ay - 19), 6, 2);
+  for (let r = 0; r < 4; r++) px(ctx, "rgba(22,31,41,0.7)", bx + 5 + r * 2 + Math.sin(t * 2.6 + r) * 2, waterline + 6 + r * 3, 50 - r * 4, 1);
   ctx.restore();
   for (let r = 0; r < 8; r++) {
     const inset = Math.floor(r * r * 0.18);
@@ -364,13 +371,13 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
   px(ctx, "#2c5c6a", ax + 3, ay - 8, 4, 2);
   px(ctx, "#f2c9a0", handX, handY - 1, 2, 2);
   // rod
-  let tipX = ROD_TIP.x, tipY = ROD_TIP.y;
+  let tipX = rodTipX, tipY = rodTipY;
   if (st.phase === "charging") {
     tipX = handX - 10 - st.power * 6;
-    tipY = ROD_TIP.y - 4;
+    tipY = rodTipY - 4;
   } else if (st.phase === "reeling" || st.phase === "bite") {
-    tipX = ROD_TIP.x + 2;
-    tipY = ROD_TIP.y + 6 + pull;
+    tipX = rodTipX + 2;
+    tipY = rodTipY + 6 + pull;
   }
   line(ctx, "#8a5a2b", handX, handY, tipX, tipY);
   px(ctx, "#e0a24a", handX + 1, handY - 1, 2, 2);
@@ -382,7 +389,8 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     if (st.phase === "casting") {
       const u = st.castT;
       bxp = tipX + (b.x - tipX) * u;
-      byp = tipY + (b.y - tipY) * u - Math.sin(u * Math.PI) * 40;
+      const arc = Math.min(22, Math.max(5, (b.y - tipY) * 0.36));
+      byp = tipY + (b.y - tipY) * u - Math.sin(u * Math.PI) * arc;
     } else if (st.phase === "waiting") {
       byp += Math.round(Math.sin(t * 3) * 0.6);
     } else if (st.phase === "bite") {
@@ -394,9 +402,9 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     // The moving lure gets a brief broken reflection when it reaches the lake.
     if (st.phase === "casting" && byp >= HORIZON - 2) {
       const fade = Math.max(0, Math.min(0.18, (byp - HORIZON + 5) * 0.025));
-      px(ctx, `rgba(242,220,166,${fade})`, bxp - 2 + Math.sin(t * 3) * 2, HORIZON + 8, 2, 1);
+      px(ctx, `rgba(242,220,166,${fade})`, bxp - 2 + Math.sin(t * 3) * 2, Math.min(H - 1, byp + 3), 2, 1);
     } else if (st.phase === "waiting" || st.phase === "bite" || st.phase === "reeling") {
-      px(ctx, "rgba(217,69,59,0.18)", bxp + Math.sin(t * 3) * 2, HORIZON + 9, 2, 1);
+      px(ctx, "rgba(217,69,59,0.18)", bxp + Math.sin(t * 3) * 2, Math.min(H - 1, byp + 3), 2, 1);
     }
     // sagging line
     const n = 40;

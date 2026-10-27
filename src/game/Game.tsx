@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { drawScene, dayInfo, W, H, HORIZON, type SceneState } from "./scene";
+import { drawScene, dayInfo, mountainLineY, W, H, HORIZON, type SceneState } from "./scene";
 import {
   SPECIES, RARITY_COLOR, ROD_PRICES, LURE_PRICES, ROD_NAMES, LURE_NAMES, QUESTS, NEW_SAVE, xpFor,
   type Save, type Species, type CaughtFish,
@@ -8,6 +8,11 @@ import { FishSprite } from "./FishSprite";
 import { LakeAudio } from "./audio";
 
 const KEY = "tidebound-save-v1";
+
+function castTarget(power: number) {
+  const y = HORIZON + 6 + Math.random() * (H - HORIZON - 21);
+  return { x: 135 + power * 165, y };
+}
 type Phase = "idle" | "charging" | "casting" | "waiting" | "bite" | "reeling" | "caught" | "escaped";
 type Panel = null | "shop" | "journal" | "settings" | "pause" | "confirm";
 
@@ -41,7 +46,6 @@ interface G extends SceneState {
   birdY: number;
   nextBirdAt: number;
   meteorT: number;
-  meteorDuration: number;
   meteorX: number;
   meteorY: number;
   nextMeteorAt: number;
@@ -89,7 +93,7 @@ export function Game() {
     rain: 0, rainLeft: 0, nextRainAt: 600 + Math.random() * 600, fishJump: 0, fishX: 190, nextFishAt: 38 + Math.random() * 38,
     surfaceSplash: 0, surfaceX: 210, surfaceY: HORIZON + 8, nextSplashAt: 16 + Math.random() * 20, nextRainDropAt: 0.5,
     fishY: HORIZON + 8, birdT: -1, birdDuration: 12, birdFlock: 0, birdDir: 1, birdY: 28, nextBirdAt: 18 + Math.random() * 27,
-    meteorT: -1, meteorDuration: 0.75, meteorX: 190, meteorY: 16, nextMeteorAt: 35 + Math.random() * 45,
+    meteorT: -1, meteorX: 190, meteorY: 16, nextMeteorAt: 35 + Math.random() * 45,
   });
 
   const setPhase = useCallback((p: Phase) => {
@@ -220,7 +224,7 @@ export function Game() {
     const G = g.current;
     if (phaseRef.current === "charging") {
       const pw = Math.max(0.15, G.power);
-      G.bobber = { x: 135 + pw * 165, y: HORIZON + 6 + (1 - pw) * 50 };
+      G.bobber = castTarget(pw);
       G.castT = 0;
       audio.current.play("cast");
       setPhase("casting");
@@ -229,6 +233,13 @@ export function Game() {
 
   // keyboard
   useEffect(() => {
+    const pointerActivity = (e: PointerEvent) => {
+      if (!startedRef.current || (e.button !== 0 && e.button !== 2)) return;
+      lastActivity.current = Date.now();
+      idleMode.current = false;
+      setIdleActive(false);
+      setIdleNotice(false);
+    };
     const down = (e: KeyboardEvent) => {
       if (startedRef.current && ["Space", "KeyS", "KeyJ", "Escape"].includes(e.code)) {
         lastActivity.current = Date.now();
@@ -249,9 +260,14 @@ export function Game() {
     const up = (e: KeyboardEvent) => {
       if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); actionUp(); }
     };
+    window.addEventListener("pointerdown", pointerActivity);
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
-    return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
+    return () => {
+      window.removeEventListener("pointerdown", pointerActivity);
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+    };
   }, [actionDown, actionUp]);
 
   // game loop
@@ -265,7 +281,7 @@ export function Game() {
       last = now;
       const G = g.current;
       const paused = panelRef.current !== null;
-      if (startedRef.current && !paused && Date.now() - lastActivity.current >= 15000 && !idleMode.current) {
+      if (startedRef.current && !paused && Date.now() - lastActivity.current >= 21000 && !idleMode.current) {
         idleMode.current = true;
         setIdleActive(true);
         setIdleNotice(true);
@@ -277,7 +293,7 @@ export function Game() {
         const s = saveRef.current;
         if (idleMode.current) {
           if ((p === "idle" || p === "caught" || p === "escaped") && performance.now() >= idleRecastAt.current) {
-            reset(); G.power = 0.65; G.bobber = { x: 230, y: HORIZON + 18 }; G.castT = 0;
+            reset(); G.power = 0.65; G.bobber = castTarget(0.65); G.castT = 0;
             audio.current.play("cast"); setPhase("casting");
           } else if (p === "bite" || p === "reeling") {
             audio.current.play("hook"); finishCatch();
@@ -342,14 +358,15 @@ export function Game() {
           }
           if (G.meteorT >= 0) {
             G.meteorT += dt;
-            if (G.meteorT >= G.meteorDuration) G.meteorT = -1;
+            const meteorX = G.meteorX + G.meteorT * 32;
+            const meteorY = G.meteorY + G.meteorT * 36;
+            if (meteorY >= mountainLineY(meteorX, G.t) || G.meteorT > 3) G.meteorT = -1;
           } else if (nowNight) {
             G.nextMeteorAt -= dt;
             if (G.nextMeteorAt <= 0) {
               G.meteorT = 0;
-              G.meteorDuration = 0.65 + Math.random() * 0.45;
               G.meteorX = 36 + Math.random() * 230;
-              G.meteorY = 8 + Math.random() * 35;
+              G.meteorY = 8 + Math.random() * 22;
               G.nextMeteorAt = 38 + Math.random() * 52;
             }
           } else G.nextMeteorAt = Math.min(G.nextMeteorAt, 20);
@@ -469,10 +486,11 @@ export function Game() {
           width={W}
           height={H}
           className="tb-canvas"
-          onPointerDown={(e) => { e.preventDefault(); actionDown(); }}
-          onPointerUp={actionUp}
-          onPointerLeave={actionUp}
-          onPointerCancel={actionUp}
+          onPointerDown={(e) => { e.preventDefault(); if (e.button === 0) actionDown(); }}
+          onPointerUp={(e) => { if (e.button === 0) actionUp(); }}
+          onPointerLeave={(e) => { if (e.buttons & 1) actionUp(); }}
+          onPointerCancel={(e) => { if (e.button === 0) actionUp(); }}
+          onContextMenu={(e) => e.preventDefault()}
           aria-label="Fishing lake"
         />
 
@@ -690,10 +708,11 @@ export function Game() {
         <div className="tb-controls-bar">
           <button
             className={`tb-btn tb-action tb-action-${phase}`}
-            onPointerDown={(e) => { e.preventDefault(); actionDown(); }}
-            onPointerUp={actionUp}
-            onPointerLeave={actionUp}
-            onPointerCancel={actionUp}
+            onPointerDown={(e) => { e.preventDefault(); if (e.button === 0) actionDown(); }}
+            onPointerUp={(e) => { if (e.button === 0) actionUp(); }}
+            onPointerLeave={(e) => { if (e.buttons & 1) actionUp(); }}
+            onPointerCancel={(e) => { if (e.button === 0) actionUp(); }}
+            onContextMenu={(e) => e.preventDefault()}
             disabled={phase === "casting"}
           >
             {btnLabel[phase]}
