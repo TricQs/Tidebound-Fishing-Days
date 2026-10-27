@@ -22,6 +22,16 @@ interface G extends SceneState {
   hits: number;
   misses: number;
   powerDir: number;
+  rain: number;
+  rainLeft: number;
+  nextRainAt: number;
+  fishJump: number;
+  fishX: number;
+  nextFishAt: number;
+  surfaceSplash: number;
+  surfaceX: number;
+  nextSplashAt: number;
+  nextRainDropAt: number;
 }
 
 export function Game() {
@@ -49,10 +59,13 @@ export function Game() {
   const audio = useRef(new LakeAudio());
   const lastActivity = useRef(Date.now());
   const idleMode = useRef(false);
+  const idleRecastAt = useRef(0);
 
   const g = useRef<G>({
     t: 60, phase: "idle", power: 0, bobber: null, castT: 0, biteT: 0, reelPull: 0, splash: 0,
     waitLeft: 0, biteLeft: 0, fish: null, marker: 0, dir: 1, zoneC: 0.5, zoneW: 0.2, hits: 0, misses: 0, powerDir: 1,
+    rain: 0, rainLeft: 0, nextRainAt: 600 + Math.random() * 600, fishJump: 0, fishX: 190, nextFishAt: 38 + Math.random() * 38,
+    surfaceSplash: 0, surfaceX: 210, nextSplashAt: 16 + Math.random() * 20, nextRainDropAt: 0.5,
   });
 
   const setPhase = useCallback((p: Phase) => {
@@ -124,7 +137,7 @@ export function Game() {
       const prev = s.journal[f.id];
       if (!prev) window.setTimeout(() => flash(`New species: ${f.name}!`), 200);
       s.journal = { ...s.journal, [f.id]: { count: (prev?.count ?? 0) + 1, best: Math.max(prev?.best ?? 0, weight) } };
-      const xpGain = Math.round(f.value * 0.8 + 5);
+      const xpGain = Math.max(1, Math.round((f.value * 0.8 + 5) * (idleMode.current ? 0.25 : 1)));
       let xp = s.xp + xpGain, level = s.level;
       while (xp >= xpFor(level)) { xp -= xpFor(level); level++; window.setTimeout(() => flash(`Level up! You are now level ${level}`), 900); }
       s = { ...s, xp, level };
@@ -132,6 +145,7 @@ export function Game() {
       if (QUESTS[s.quest]?.kind === "catch" && !QUESTS[s.quest]!.species && s0.quest !== s.quest) { /* new quest starts fresh */ }
       return s;
     });
+    if (idleMode.current) idleRecastAt.current = performance.now() + 5000;
     setPhase("caught");
     audio.current.play("catch");
   }, [advanceQuest, flash, setPhase]);
@@ -205,9 +219,10 @@ export function Game() {
     };
     const activity = () => { lastActivity.current = Date.now(); idleMode.current = false; };
     window.addEventListener("pointerdown", activity);
+    window.addEventListener("pointermove", activity);
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
-    return () => { window.removeEventListener("pointerdown", activity); window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
+    return () => { window.removeEventListener("pointerdown", activity); window.removeEventListener("pointermove", activity); window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
   }, [actionDown, actionUp]);
 
   // game loop
@@ -227,8 +242,50 @@ export function Game() {
         const p = phaseRef.current;
         const s = saveRef.current;
         if (idleMode.current) {
-          if (p === "idle" || p === "caught" || p === "escaped") { reset(); G.power = 0.65; G.bobber = { x: 230, y: HORIZON + 18 }; G.castT = 0; audio.current.play("cast"); setPhase("casting"); }
-          else if (p === "bite" || p === "reeling") { audio.current.play("hook"); finishCatch(); }
+          if (p === "idle" || ((p === "caught" || p === "escaped") && performance.now() >= idleRecastAt.current)) {
+            reset(); G.power = 0.65; G.bobber = { x: 230, y: HORIZON + 18 }; G.castT = 0;
+            audio.current.play("cast"); setPhase("casting");
+          } else if (p === "bite" || p === "reeling") {
+            audio.current.play("hook"); finishCatch();
+          }
+        }
+        if (startedRef.current) {
+          if (G.rain) {
+            G.rainLeft -= dt;
+            G.nextRainDropAt -= dt;
+            if (G.nextRainDropAt <= 0) {
+              audio.current.play("droplet");
+              G.nextRainDropAt = 0.35 + Math.random() * 0.9;
+            }
+            if (G.rainLeft <= 0) {
+              G.rain = 0;
+              audio.current.setRain(false);
+              G.nextRainAt = 600 + Math.random() * 600;
+            }
+          } else {
+            G.nextRainAt -= dt;
+            if (G.nextRainAt <= 0) {
+              G.rain = 1;
+              G.rainLeft = 300;
+              G.nextRainDropAt = 0.2;
+              audio.current.setRain(true);
+            }
+          }
+          G.fishJump = Math.max(0, G.fishJump - dt);
+          G.surfaceSplash = Math.max(0, G.surfaceSplash - dt);
+          G.nextFishAt -= dt;
+          if (G.nextFishAt <= 0) {
+            G.fishJump = 1.35;
+            G.fishX = 135 + Math.random() * 160;
+            G.nextFishAt = 38 + Math.random() * 48;
+            window.setTimeout(() => audio.current.play("jump"), 1050);
+          }
+          G.nextSplashAt -= dt;
+          if (G.nextSplashAt <= 0) {
+            G.surfaceSplash = 0.75;
+            G.surfaceX = 125 + Math.random() * 185;
+            G.nextSplashAt = 16 + Math.random() * 24;
+          }
         }
         if (p === "charging") {
           G.power += G.powerDir * dt * 1.2;
@@ -240,7 +297,7 @@ export function Game() {
           if (G.castT >= 1) {
             G.castT = 1; G.splash = 1;
             audio.current.play("splash");
-            G.waitLeft = 1.8 + Math.random() * 4.5 - s.lure * 0.3;
+            G.waitLeft = (idleMode.current ? 10 : 7) + Math.random() * (idleMode.current ? 10 : 8);
             setPhase("waiting");
           }
         } else if (p === "waiting") {
@@ -269,7 +326,7 @@ export function Game() {
       }
       drawScene(ctx, G);
       nightCheck += dt;
-      if (nightCheck > 1) { nightCheck = 0; setIsNight(dayInfo(G.t).isNight); }
+      if (nightCheck > 1) { nightCheck = 0; const night = dayInfo(G.t).isNight; setIsNight(night); audio.current.setNight(night); }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);

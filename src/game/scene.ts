@@ -17,7 +17,7 @@ const PINE = ["#1f3a3f", "#24493f", "#22273a", "#0a1322"].map(hex);
 const WATER = ["#1d4a5e", "#1e5a6b", "#22354f", "#0b1a2e"].map(hex);
 const WATER_DEEP = ["#10293f", "#0f3448", "#141e36", "#050c1a"].map(hex);
 
-export const CYCLE = 240; // seconds per day
+export const CYCLE = 840; // 7 minutes of daylight and 7 minutes of night
 
 export function dayInfo(t: number) {
   const p = ((t % CYCLE) / CYCLE) * 4;
@@ -25,7 +25,7 @@ export function dayInfo(t: number) {
   const j = (i + 1) % 4;
   const f = p - Math.floor(p);
   const s = f * f * (3 - 2 * f);
-  return { i, j, s, phase: p, isNight: p > 2.85 && p < 3.85 };
+  return { i, j, s, phase: p, isNight: p >= 2 };
 }
 const pick = (arr: RGB[], d: ReturnType<typeof dayInfo>) => mix(arr[d.i]!, arr[d.j]!, d.s);
 const hash = (n: number) => {
@@ -42,6 +42,11 @@ export interface SceneState {
   biteT: number;
   reelPull: number;
   splash: number;
+  rain?: number;
+  fishJump?: number;
+  fishX?: number;
+  surfaceSplash?: number;
+  surfaceX?: number;
 }
 
 function px(ctx: CanvasRenderingContext2D, c: string, x: number, y: number, w = 1, h = 1) {
@@ -160,6 +165,60 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
   px(ctx, "#e2a85c", bx + 2, by + 3, 56 - 4, 1);
   // reflection of boat
   for (let r = 0; r < 4; r++) px(ctx, "rgba(10,20,30,0.35)", bx + 4 + r * 2 + Math.sin(t * 3 + r) * 1.5, by + 9 + r * 2, 52 - r * 4, 1);
+
+  // Sparse natural fish breaches and rain hitting the lake surface.
+  if ((st.fishJump ?? 0) > 0) {
+    const left = st.fishJump!;
+    const progress = Math.max(0, Math.min(1, (1.35 - left) / 0.95));
+    const fx = st.fishX ?? 190;
+    if (left > 0.3) {
+      const fy = HORIZON - Math.sin(progress * Math.PI) * 17;
+      const facing = progress < 0.5 ? 1 : -1;
+      px(ctx, "#d5b45b", fx, fy, 7, 3);
+      px(ctx, "#e9d17c", fx + (facing > 0 ? 2 : 1), fy - 2, 4, 2);
+      px(ctx, "#6c9b8c", fx + (facing > 0 ? 1 : 5), fy + 2, 2, 2);
+      px(ctx, "#f7e8b7", fx + (facing > 0 ? 6 : 0), fy, 1, 1);
+    } else {
+      const splashAge = (0.3 - left) / 0.3;
+      const radius = 2 + splashAge * 7;
+      px(ctx, `rgba(225,246,250,${1 - splashAge})`, fx - radius, HORIZON + 1, 2, 1);
+      px(ctx, `rgba(225,246,250,${1 - splashAge})`, fx + radius, HORIZON + 1, 2, 1);
+      px(ctx, `rgba(225,246,250,${1 - splashAge})`, fx - radius * 0.5, HORIZON - splashAge * 3, 1, 2);
+    }
+  }
+  if ((st.surfaceSplash ?? 0) > 0) {
+    const age = 1 - st.surfaceSplash!;
+    const radius = 1 + age * 5;
+    const sx = st.surfaceX ?? 220;
+    px(ctx, `rgba(220,245,250,${st.surfaceSplash})`, sx - radius, HORIZON + 1, 2, 1);
+    px(ctx, `rgba(220,245,250,${st.surfaceSplash})`, sx + radius, HORIZON + 1, 2, 1);
+    px(ctx, `rgba(245,252,255,${st.surfaceSplash})`, sx, HORIZON - age * 3, 1, 2);
+  }
+  if ((st.rain ?? 0) > 0) {
+    ctx.fillStyle = "rgba(19,32,51,0.16)";
+    ctx.fillRect(0, 0, W, HORIZON);
+    for (let i = 0; i < 5; i++) {
+      const cx = hash(i + 1540) * W, cy = 13 + hash(i + 1640) * 34;
+      ctx.fillStyle = "rgba(49,65,78,0.32)";
+      px(ctx, ctx.fillStyle, cx, cy, 14, 3);
+      px(ctx, ctx.fillStyle, cx - 3, cy + 1, 20, 3);
+      px(ctx, ctx.fillStyle, cx + 3, cy - 2, 7, 2);
+    }
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 96; i++) {
+      const x = (hash(i + 210) * W + Math.floor(t * (30 + hash(i + 410) * 24))) % W;
+      const y = (hash(i + 610) * H + Math.floor(t * (95 + hash(i + 810) * 65))) % H;
+      ctx.strokeStyle = i % 4 === 0 ? "rgba(205,235,245,0.52)" : "rgba(175,215,232,0.34)";
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - 2, y + 5); ctx.stroke();
+    }
+    for (let i = 0; i < 24; i++) {
+      const x = hash(i + 1020) * W;
+      const y = HORIZON + 1 + hash(i + 1220) * (H - HORIZON - 4);
+      const pulse = (t * (1.1 + hash(i + 1320)) + hash(i + 1420) * 5) % 1;
+      px(ctx, `rgba(215,240,248,${(1 - pulse) * 0.7})`, x - pulse * 3, y, 2, 1);
+      px(ctx, `rgba(215,240,248,${(1 - pulse) * 0.7})`, x + pulse * 3, y, 2, 1);
+    }
+  }
 
   // angler (sitting)
   const ax = bx + 30, ay = by;
