@@ -5,6 +5,7 @@ import {
   type Save, type Species, type CaughtFish,
 } from "./data";
 import { FishSprite } from "./FishSprite";
+import { LakeAudio } from "./audio";
 
 const KEY = "tidebound-save-v1";
 type Phase = "idle" | "charging" | "casting" | "waiting" | "bite" | "reeling" | "caught" | "escaped";
@@ -45,6 +46,9 @@ export function Game() {
   const [toast, setToast] = useState<string | null>(null);
   const [isNight, setIsNight] = useState(false);
   const uid = useRef(1);
+  const audio = useRef(new LakeAudio());
+  const lastActivity = useRef(Date.now());
+  const idleMode = useRef(false);
 
   const g = useRef<G>({
     t: 60, phase: "idle", power: 0, bobber: null, castT: 0, biteT: 0, reelPull: 0, splash: 0,
@@ -111,7 +115,8 @@ export function Game() {
   const finishCatch = useCallback(() => {
     const f = g.current.fish!;
     const weight = +(f.minW + Math.random() * (f.maxW - f.minW)).toFixed(2);
-    const value = Math.round(f.value * (0.7 + (weight - f.minW) / (f.maxW - f.minW + 0.001) * 0.8));
+    const baseValue = Math.round(f.value * (0.7 + (weight - f.minW) / (f.maxW - f.minW + 0.001) * 0.8));
+    const value = idleMode.current ? Math.max(1, Math.round(baseValue * 0.5)) : baseValue;
     const c: CaughtFish = { uid: uid.current++, id: f.id, weight, value };
     setLastCatch(c);
     setSave((s0) => {
@@ -128,6 +133,7 @@ export function Game() {
       return s;
     });
     setPhase("caught");
+    audio.current.play("catch");
   }, [advanceQuest, flash, setPhase]);
 
   const reset = useCallback(() => {
@@ -150,6 +156,7 @@ export function Game() {
       G.marker = 0; G.dir = 1; G.hits = 0; G.misses = 0;
       newZone();
       setReelInfo({ hits: 0, need: f.hits, misses: 0, max: 2 + (s.rod >= 2 ? 1 : 0) });
+      audio.current.play("hook");
       setPhase("reeling");
     } else if (p === "reeling") {
       const s = saveRef.current;
@@ -173,6 +180,7 @@ export function Game() {
       const pw = Math.max(0.15, G.power);
       G.bobber = { x: 135 + pw * 165, y: HORIZON + 6 + (1 - pw) * 50 };
       G.castT = 0;
+      audio.current.play("cast");
       setPhase("casting");
     }
   }, [setPhase]);
@@ -180,6 +188,7 @@ export function Game() {
   // keyboard
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
+      lastActivity.current = Date.now(); idleMode.current = false;
       if (e.code === "Space" || e.code === "Enter") {
         if (!startedRef.current) return;
         e.preventDefault();
@@ -191,11 +200,14 @@ export function Game() {
       else if (e.code === "KeyJ" && startedRef.current) setPanel((p) => (p === "journal" ? null : "journal"));
     };
     const up = (e: KeyboardEvent) => {
+      lastActivity.current = Date.now(); idleMode.current = false;
       if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); actionUp(); }
     };
+    const activity = () => { lastActivity.current = Date.now(); idleMode.current = false; };
+    window.addEventListener("pointerdown", activity);
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
-    return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
+    return () => { window.removeEventListener("pointerdown", activity); window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
   }, [actionDown, actionUp]);
 
   // game loop
@@ -208,11 +220,16 @@ export function Game() {
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
       const G = g.current;
-      const paused = panelRef.current === "pause" || panelRef.current === "confirm";
+      const paused = panelRef.current !== null;
+      if (startedRef.current && !paused && Date.now() - lastActivity.current >= 15000) idleMode.current = true;
       if (!paused) {
         G.t += dt;
         const p = phaseRef.current;
         const s = saveRef.current;
+        if (idleMode.current) {
+          if (p === "idle" || p === "caught" || p === "escaped") { reset(); G.power = 0.65; G.bobber = { x: 230, y: HORIZON + 18 }; G.castT = 0; audio.current.play("cast"); setPhase("casting"); }
+          else if (p === "bite" || p === "reeling") { audio.current.play("hook"); finishCatch(); }
+        }
         if (p === "charging") {
           G.power += G.powerDir * dt * 1.2;
           if (G.power >= 1) { G.power = 1; G.powerDir = -1; }
@@ -222,6 +239,7 @@ export function Game() {
           G.castT += dt * 1.6;
           if (G.castT >= 1) {
             G.castT = 1; G.splash = 1;
+            audio.current.play("splash");
             G.waitLeft = 1.8 + Math.random() * 4.5 - s.lure * 0.3;
             setPhase("waiting");
           }
@@ -229,6 +247,7 @@ export function Game() {
           G.waitLeft -= dt;
           if (G.waitLeft <= 0) {
             G.fish = pickFish();
+            audio.current.play("bite");
             G.biteLeft = 1.1 + s.rod * 0.2;
             setPhase("bite");
           }
@@ -407,7 +426,7 @@ export function Game() {
               <p className="tb-eyebrow">~ a cozy lake story ~</p>
               <h1>TIDEBOUND</h1>
               <p className="tb-sub">Little Fishing Days</p>
-              <button className="tb-btn tb-btn-primary tb-btn-lg" onClick={() => setStarted(true)} disabled={!loaded}>
+              <button className="tb-btn tb-btn-primary tb-btn-lg" onClick={() => { audio.current.start(); lastActivity.current = Date.now(); setStarted(true); }} disabled={!loaded}>
                 {save.totalCaught > 0 ? "Continue" : "Play"}
               </button>
               <div className="tb-controls">
