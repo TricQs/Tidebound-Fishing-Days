@@ -316,6 +316,7 @@ export function Game() {
           onPointerDown={(e) => { e.preventDefault(); actionDown(); }}
           onPointerUp={actionUp}
           onPointerLeave={actionUp}
+          onPointerCancel={actionUp}
           aria-label="Fishing lake"
         />
 
@@ -342,7 +343,15 @@ export function Game() {
         )}
 
         {started && phase === "charging" && (
-          <div className="tb-meter tb-power"><div ref={powerRef} className="tb-power-fill" /></div>
+          <div className="tb-power-wrap">
+            <div className="tb-power-head">
+              <span>⚡ CAST POWER</span>
+              <span>Release to throw</span>
+            </div>
+            <div className="tb-meter tb-power-bar">
+              <div ref={powerRef} className="tb-power-fill" />
+            </div>
+          </div>
         )}
 
         {started && phase === "reeling" && (
@@ -355,10 +364,11 @@ export function Game() {
               <div ref={zoneRef} className="tb-zone" />
               <div ref={markerRef} className="tb-marker" />
             </div>
+            <div className="tb-reel-sub">Tap REEL when in green zone!</div>
           </div>
         )}
 
-        {started && showHints && !panel && phase !== "caught" && (
+        {started && showHints && !panel && phase !== "caught" && phase !== "charging" && phase !== "reeling" && (
           <div className={`tb-hint ${phase === "bite" ? "tb-hint-alert" : ""}`}>{hint[phase]}</div>
         )}
 
@@ -504,6 +514,7 @@ export function Game() {
             onPointerDown={(e) => { e.preventDefault(); actionDown(); }}
             onPointerUp={actionUp}
             onPointerLeave={actionUp}
+            onPointerCancel={actionUp}
             disabled={phase === "casting"}
           >
             {btnLabel[phase]}
