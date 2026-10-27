@@ -307,6 +307,14 @@ export function Game() {
 
   return (
     <div className="tb-root">
+      <a
+        href="https://www.youtube.com/@tricq69"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="tb-credit"
+      >
+        Made By TricQ
+      </a>
       <div className="tb-stage">
         <canvas
           ref={canvasRef}
