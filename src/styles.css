@@ -264,3 +264,20 @@ kbd { font-family: var(--tb-font); font-size: .8em; background: var(--tb-cream-2
   .tb-reel-sub { font-size: 10px; }
   .tb-upgrades, .tb-journal { grid-template-columns: 1fr; }
 }
+
+.tb-idle-status { gap: 6px; min-width: 24px; justify-content: center; transition: opacity 180ms ease; }
+.tb-idle-status.tb-idle-dim .tb-idle-clock { opacity: 0.3; }
+.tb-idle-status.tb-idle-notice .tb-idle-clock { opacity: 1; }
+.tb-idle-clock { position: relative; width: 14px; height: 14px; display: inline-block; border: 1.5px solid currentColor; border-radius: 50%; box-sizing: border-box; }
+.tb-idle-clock::before { content: ""; position: absolute; width: 2px; height: 2px; left: 4.5px; top: 4.5px; background: currentColor; border-radius: 50%; }
+.tb-idle-clock i { position: absolute; width: 1px; height: 4px; left: 5px; top: 1px; background: currentColor; transform-origin: 50% 5px; animation: tb-clock-cardinals 4s steps(1, end) infinite; }
+@keyframes tb-clock-cardinals {
+  0%, 24.99% { transform: rotate(0deg); }
+  25%, 49.99% { transform: rotate(90deg); }
+  50%, 74.99% { transform: rotate(180deg); }
+  75%, 100% { transform: rotate(270deg); }
+}
+.tb-sound-settings { display: grid; gap: 18px; text-align: left; margin: 20px 0 12px; }
+.tb-sound-settings label { display: grid; gap: 8px; }
+.tb-sound-settings label > span { display: flex; justify-content: space-between; align-items: center; font-size: 15px; }
+.tb-sound-settings input[type="range"] { width: 100%; accent-color: var(--tb-amber-dark); }

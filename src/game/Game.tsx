@@ -9,7 +9,7 @@ import { LakeAudio } from "./audio";
 
 const KEY = "tidebound-save-v1";
 type Phase = "idle" | "charging" | "casting" | "waiting" | "bite" | "reeling" | "caught" | "escaped";
-type Panel = null | "shop" | "journal" | "pause" | "confirm";
+type Panel = null | "shop" | "journal" | "settings" | "pause" | "confirm";
 
 interface G extends SceneState {
   waitLeft: number;
@@ -32,6 +32,19 @@ interface G extends SceneState {
   surfaceX: number;
   nextSplashAt: number;
   nextRainDropAt: number;
+  fishY: number;
+  surfaceY: number;
+  birdT: number;
+  birdDuration: number;
+  birdFlock: number;
+  birdDir: number;
+  birdY: number;
+  nextBirdAt: number;
+  meteorT: number;
+  meteorDuration: number;
+  meteorX: number;
+  meteorY: number;
+  nextMeteorAt: number;
 }
 
 export function Game() {
@@ -55,6 +68,15 @@ export function Game() {
   const [reelInfo, setReelInfo] = useState({ hits: 0, need: 3, misses: 0, max: 2 });
   const [toast, setToast] = useState<string | null>(null);
   const [isNight, setIsNight] = useState(false);
+  const [idleActive, setIdleActive] = useState(false);
+  const [idleNotice, setIdleNotice] = useState(false);
+  const [soundSettings, setSoundSettings] = useState(() => {
+    if (typeof window === "undefined") return { ambience: 100, effects: 80 };
+    try {
+      const raw = localStorage.getItem("tidebound-audio-v1");
+      return raw ? { ambience: 100, effects: 80, ...JSON.parse(raw) } : { ambience: 100, effects: 80 };
+    } catch { return { ambience: 100, effects: 80 }; }
+  });
   const uid = useRef(1);
   const audio = useRef(new LakeAudio());
   const lastActivity = useRef(Date.now());
@@ -65,7 +87,9 @@ export function Game() {
     t: 60, phase: "idle", power: 0, bobber: null, castT: 0, biteT: 0, reelPull: 0, splash: 0,
     waitLeft: 0, biteLeft: 0, fish: null, marker: 0, dir: 1, zoneC: 0.5, zoneW: 0.2, hits: 0, misses: 0, powerDir: 1,
     rain: 0, rainLeft: 0, nextRainAt: 600 + Math.random() * 600, fishJump: 0, fishX: 190, nextFishAt: 38 + Math.random() * 38,
-    surfaceSplash: 0, surfaceX: 210, nextSplashAt: 16 + Math.random() * 20, nextRainDropAt: 0.5,
+    surfaceSplash: 0, surfaceX: 210, surfaceY: HORIZON + 8, nextSplashAt: 16 + Math.random() * 20, nextRainDropAt: 0.5,
+    fishY: HORIZON + 8, birdT: -1, birdDuration: 12, birdFlock: 0, birdDir: 1, birdY: 28, nextBirdAt: 18 + Math.random() * 27,
+    meteorT: -1, meteorDuration: 0.75, meteorX: 190, meteorY: 16, nextMeteorAt: 35 + Math.random() * 45,
   });
 
   const setPhase = useCallback((p: Phase) => {
@@ -91,6 +115,10 @@ export function Game() {
     if (loaded) localStorage.setItem(KEY, JSON.stringify(save));
     uid.current = Math.max(uid.current, ...save.bag.map((b) => b.uid + 1));
   }, [save, loaded]);
+  useEffect(() => {
+    audio.current.setVolumes(soundSettings.ambience / 100, soundSettings.effects / 100);
+    localStorage.setItem("tidebound-audio-v1", JSON.stringify(soundSettings));
+  }, [soundSettings]);
 
   const advanceQuest = useCallback((s: Save, kind: "catch" | "sell" | "upgrade", species?: string, n = 1): Save => {
     const q = QUESTS[s.quest];
@@ -202,7 +230,12 @@ export function Game() {
   // keyboard
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      lastActivity.current = Date.now(); idleMode.current = false;
+      if (startedRef.current && ["Space", "KeyS", "KeyJ", "Escape"].includes(e.code)) {
+        lastActivity.current = Date.now();
+        idleMode.current = false;
+        setIdleActive(false);
+        setIdleNotice(false);
+      }
       if (e.code === "Space" || e.code === "Enter") {
         if (!startedRef.current) return;
         e.preventDefault();
@@ -214,15 +247,11 @@ export function Game() {
       else if (e.code === "KeyJ" && startedRef.current) setPanel((p) => (p === "journal" ? null : "journal"));
     };
     const up = (e: KeyboardEvent) => {
-      lastActivity.current = Date.now(); idleMode.current = false;
       if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); actionUp(); }
     };
-    const activity = () => { lastActivity.current = Date.now(); idleMode.current = false; };
-    window.addEventListener("pointerdown", activity);
-    window.addEventListener("pointermove", activity);
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
-    return () => { window.removeEventListener("pointerdown", activity); window.removeEventListener("pointermove", activity); window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
+    return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
   }, [actionDown, actionUp]);
 
   // game loop
@@ -236,13 +265,18 @@ export function Game() {
       last = now;
       const G = g.current;
       const paused = panelRef.current !== null;
-      if (startedRef.current && !paused && Date.now() - lastActivity.current >= 15000) idleMode.current = true;
+      if (startedRef.current && !paused && Date.now() - lastActivity.current >= 15000 && !idleMode.current) {
+        idleMode.current = true;
+        setIdleActive(true);
+        setIdleNotice(true);
+        window.setTimeout(() => setIdleNotice(false), 3000);
+      }
       if (!paused) {
         G.t += dt;
         const p = phaseRef.current;
         const s = saveRef.current;
         if (idleMode.current) {
-          if (p === "idle" || ((p === "caught" || p === "escaped") && performance.now() >= idleRecastAt.current)) {
+          if ((p === "idle" || p === "caught" || p === "escaped") && performance.now() >= idleRecastAt.current) {
             reset(); G.power = 0.65; G.bobber = { x: 230, y: HORIZON + 18 }; G.castT = 0;
             audio.current.play("cast"); setPhase("casting");
           } else if (p === "bite" || p === "reeling") {
@@ -276,16 +310,49 @@ export function Game() {
           G.nextFishAt -= dt;
           if (G.nextFishAt <= 0) {
             G.fishJump = 1.35;
-            G.fishX = 135 + Math.random() * 160;
-            G.nextFishAt = 38 + Math.random() * 48;
+            G.fishX = Math.random() < 0.38 ? 68 + Math.random() * 66 : 135 + Math.random() * 160;
+            G.fishY = HORIZON + 5 + Math.random() * 20;
+            G.nextFishAt = G.rain ? 14 + Math.random() * 18 : 38 + Math.random() * 48;
             window.setTimeout(() => audio.current.play("jump"), 1050);
           }
+          if (G.rain) G.nextFishAt = Math.min(G.nextFishAt, 18);
           G.nextSplashAt -= dt;
           if (G.nextSplashAt <= 0) {
             G.surfaceSplash = 0.75;
-            G.surfaceX = 125 + Math.random() * 185;
+            G.surfaceX = Math.random() < 0.35 ? 68 + Math.random() * 66 : 35 + Math.random() * 270;
+            G.surfaceY = HORIZON + 4 + Math.random() * 61;
             G.nextSplashAt = 16 + Math.random() * 24;
           }
+          const nowNight = dayInfo(G.t).isNight;
+          if (G.birdT >= 0) {
+            G.birdT += dt;
+            if (G.birdT >= G.birdDuration) G.birdT = -1;
+          } else {
+            G.nextBirdAt -= dt;
+            if (G.nextBirdAt <= 0) {
+              if (!nowNight && !G.rain) {
+                G.birdT = 0;
+                G.birdDuration = 10 + Math.random() * 6;
+                G.birdFlock = Math.random() < 0.5 ? 1 : 0;
+                G.birdDir = Math.random() < 0.5 ? -1 : 1;
+                G.birdY = 15 + Math.random() * 32;
+              }
+              G.nextBirdAt = nowNight || G.rain ? 10 + Math.random() * 12 : 24 + Math.random() * 38;
+            }
+          }
+          if (G.meteorT >= 0) {
+            G.meteorT += dt;
+            if (G.meteorT >= G.meteorDuration) G.meteorT = -1;
+          } else if (nowNight) {
+            G.nextMeteorAt -= dt;
+            if (G.nextMeteorAt <= 0) {
+              G.meteorT = 0;
+              G.meteorDuration = 0.65 + Math.random() * 0.45;
+              G.meteorX = 36 + Math.random() * 230;
+              G.meteorY = 8 + Math.random() * 35;
+              G.nextMeteorAt = 38 + Math.random() * 52;
+            }
+          } else G.nextMeteorAt = Math.min(G.nextMeteorAt, 20);
         }
         if (p === "charging") {
           G.power += G.powerDir * dt * 1.2;
@@ -297,11 +364,13 @@ export function Game() {
           if (G.castT >= 1) {
             G.castT = 1; G.splash = 1;
             audio.current.play("splash");
-            G.waitLeft = (idleMode.current ? 10 : 7) + Math.random() * (idleMode.current ? 10 : 8);
+            const minWait = idleMode.current ? (G.rain ? 8 : 10) : (G.rain ? 5 : 7);
+            const waitRange = idleMode.current ? (G.rain ? 7 : 10) : (G.rain ? 6 : 8);
+            G.waitLeft = minWait + Math.random() * waitRange;
             setPhase("waiting");
           }
         } else if (p === "waiting") {
-          G.waitLeft -= dt;
+          G.waitLeft -= dt * (G.rain ? 1.2 : 1);
           if (G.waitLeft <= 0) {
             G.fish = pickFish();
             audio.current.play("bite");
@@ -360,6 +429,9 @@ export function Game() {
     reset();
     setPanel(null);
     setStarted(false);
+    idleMode.current = false;
+    setIdleActive(false);
+    setIdleNotice(false);
   };
 
   const quest = QUESTS[save.quest];
@@ -411,10 +483,17 @@ export function Game() {
               <span>Lv {save.level}</span>
               <div className="tb-xpbar"><div style={{ width: `${(save.xp / xpFor(save.level)) * 100}%` }} /></div>
             </div>
-            {isNight && <div className="tb-chip">☾ Night</div>}
+            <div className="tb-chip">{isNight ? "☾ Night" : "☀ Day"}</div>
+            {idleActive && (
+              <div className={`tb-chip tb-idle-status ${idleNotice ? "tb-idle-notice" : "tb-idle-dim"}`} aria-label="Idle Mode">
+                <span className="tb-idle-clock" aria-hidden="true"><i /></span>
+                {idleNotice && <span>Idle Mode</span>}
+              </div>
+            )}
             <div className="tb-hud-right">
               <button className="tb-btn tb-btn-sm" onClick={() => setPanel("shop")}>Dock <kbd>S</kbd></button>
               <button className="tb-btn tb-btn-sm" onClick={() => setPanel("journal")}>Journal <kbd>J</kbd></button>
+              <button className="tb-btn tb-btn-sm" onClick={() => setPanel("settings")} aria-label="Settings">⚙</button>
               <button className="tb-btn tb-btn-sm" onClick={() => setPanel("pause")} aria-label="Pause">II</button>
             </div>
           </div>
@@ -483,7 +562,7 @@ export function Game() {
               <p className="tb-eyebrow">~ a cozy lake story ~</p>
               <h1>TIDEBOUND</h1>
               <p className="tb-sub">Little Fishing Days</p>
-              <button className="tb-btn tb-btn-primary tb-btn-lg" onClick={() => { audio.current.start(); lastActivity.current = Date.now(); setStarted(true); }} disabled={!loaded}>
+              <button className="tb-btn tb-btn-primary tb-btn-lg" onClick={() => { audio.current.start(); lastActivity.current = Date.now(); idleMode.current = false; setIdleActive(false); setIdleNotice(false); setStarted(true); }} disabled={!loaded}>
                 {save.totalCaught > 0 ? "Continue" : "Play"}
               </button>
               <div className="tb-controls">
@@ -498,6 +577,22 @@ export function Game() {
         {panel && (
           <div className="tb-overlay" onClick={() => setPanel(null)}>
             <div className="tb-panel tb-wide" onClick={(e) => e.stopPropagation()}>
+              {panel === "settings" && (
+                <>
+                  <div className="tb-panel-head"><h2>Sound Settings</h2><button className="tb-btn tb-btn-sm" onClick={() => setPanel(null)}>✕</button></div>
+                  <div className="tb-sound-settings">
+                    <label>
+                      <span>Ambience <b>{soundSettings.ambience}%</b></span>
+                      <input type="range" min="0" max="100" value={soundSettings.ambience} onChange={(e) => setSoundSettings((v) => ({ ...v, ambience: Number(e.target.value) }))} />
+                    </label>
+                    <label>
+                      <span>Sound effects <b>{soundSettings.effects}%</b></span>
+                      <input type="range" min="0" max="100" value={soundSettings.effects} onChange={(e) => setSoundSettings((v) => ({ ...v, effects: Number(e.target.value) }))} />
+                    </label>
+                  </div>
+                  <p className="tb-muted">Flowing lake water, birds, night crickets and weather ambience.</p>
+                </>
+              )}
               {panel === "pause" && (
                 <>
                   <h2>Paused</h2>
@@ -507,7 +602,7 @@ export function Game() {
                       <input type="checkbox" checked={save.hints} onChange={(e) => setSave((s) => ({ ...s, hints: e.target.checked }))} />
                       Show hints
                     </label>
-                    <button className="tb-btn" onClick={() => { setPanel(null); setStarted(false); }}>Title screen</button>
+                    <button className="tb-btn" onClick={() => { setPanel(null); setStarted(false); idleMode.current = false; setIdleActive(false); setIdleNotice(false); }}>Title screen</button>
                     <button className="tb-btn tb-btn-danger" onClick={() => setPanel("confirm")}>Reset save…</button>
                   </div>
                   <p className="tb-muted">Caught {save.totalCaught} fish so far. Progress saves automatically.</p>

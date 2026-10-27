@@ -4,6 +4,10 @@ type SoundKind = "cast" | "splash" | "bite" | "hook" | "catch" | "jump" | "dropl
 export class LakeAudio {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  private ambience: GainNode | null = null;
+  private effects: GainNode | null = null;
+  private ambienceVolume = 1;
+  private effectsVolume = 0.8;
   private night = false;
   private rainSource: AudioBufferSourceNode | null = null;
   private rainGain: GainNode | null = null;
@@ -14,7 +18,13 @@ export class LakeAudio {
       this.ctx = new window.AudioContext();
       this.master = this.ctx.createGain();
       this.master.gain.value = 0.22;
+      this.ambience = this.ctx.createGain();
+      this.effects = this.ctx.createGain();
+      this.ambience.gain.value = this.ambienceVolume;
+      this.effects.gain.value = this.effectsVolume;
       this.master.connect(this.ctx.destination);
+      this.ambience.connect(this.master);
+      this.effects.connect(this.master);
       this.startWater();
       window.setInterval(() => {
         if (this.night) this.cricketCall();
@@ -28,9 +38,18 @@ export class LakeAudio {
     this.night = night;
   }
 
+  setVolumes(ambience: number, effects: number) {
+    this.ambienceVolume = Math.max(0, Math.min(1, ambience));
+    this.effectsVolume = Math.max(0, Math.min(1, effects));
+    if (!this.ctx || !this.ambience || !this.effects) return;
+    const now = this.ctx.currentTime;
+    this.ambience.gain.setTargetAtTime(this.ambienceVolume, now, 0.04);
+    this.effects.gain.setTargetAtTime(this.effectsVolume, now, 0.04);
+  }
+
   setRain(raining: boolean) {
     const ctx = this.ctx;
-    const out = this.master;
+    const out = this.ambience;
     if (!ctx || !out) return;
     if (raining && !this.rainSource) {
       const buffer = ctx.createBuffer(1, ctx.sampleRate * 4, ctx.sampleRate);
@@ -64,7 +83,7 @@ export class LakeAudio {
 
   play(kind: SoundKind) {
     this.start();
-    const ctx = this.ctx, out = this.master;
+    const ctx = this.ctx, out = this.effects;
     if (!ctx || !out) return;
     const tone = (frequency: number, duration: number, type: OscillatorType, volume: number, endFrequency = frequency, delay = 0) => {
       const now = ctx.currentTime + delay;
@@ -130,7 +149,7 @@ export class LakeAudio {
   }
 
   private startWater() {
-    const ctx = this.ctx!, out = this.master!;
+    const ctx = this.ctx!, out = this.ambience!;
     const buffer = ctx.createBuffer(1, ctx.sampleRate * 5, ctx.sampleRate);
     const data = buffer.getChannelData(0);
     for (let i = 0; i < data.length; i++) {
@@ -167,7 +186,7 @@ export class LakeAudio {
   }
 
   private birdCall() {
-    const ctx = this.ctx, out = this.master;
+    const ctx = this.ctx, out = this.ambience;
     if (!ctx || !out || ctx.state !== "running") return;
     const now = ctx.currentTime, osc = ctx.createOscillator(), gain = ctx.createGain();
     osc.type = "sine";
@@ -181,7 +200,7 @@ export class LakeAudio {
   }
 
   private cricketCall() {
-    const ctx = this.ctx, out = this.master;
+    const ctx = this.ctx, out = this.ambience;
     if (!ctx || !out || ctx.state !== "running") return;
     const now = ctx.currentTime;
     const count = 3 + Math.floor(Math.random() * 3);
