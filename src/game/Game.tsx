@@ -31,10 +31,23 @@ import { LakeAudio } from "./audio";
 
 const KEY = "tidebound-save-v1";
 
-function castTarget(boatX: number, power: number) {
+const BOAT_MIN_X = 38;
+const BOAT_MAX_X = W - 64;
+/** Seconds for rain to build from first drizzle to a full shower. */
+const RAIN_FADE_IN = 28;
+/** Seconds for rain to taper off after the weather clears. */
+const RAIN_FADE_OUT = 14;
+
+/** Bobber landing point; `facing` (1 = right, -1 = left) decides which side of the boat we cast to. */
+function castTarget(boatX: number, power: number, facing: number) {
   const y = HORIZON + 8 + Math.random() * (H - HORIZON - 24);
-  const rawX = boatX + 52 + power * 145;
+  const rawX = facing < 0 ? boatX + 8 - power * 145 : boatX + 52 + power * 145;
   return { x: Math.max(48, Math.min(W - 10, rawX)), y };
+}
+
+/** Point on the water the angler is currently looking at (used for the sonar preview). */
+function lookAheadX(boatX: number, facing: number) {
+  return Math.max(48, Math.min(W - 10, facing < 0 ? boatX - 35 : boatX + 95));
 }
 
 type Phase = "idle" | "charging" | "casting" | "waiting" | "bite" | "reeling" | "caught" | "escaped";
@@ -75,6 +88,8 @@ interface G extends SceneState {
   boatX: number;
   boatVx: number;
   moveDir: number;
+  facing: number;
+  rainTarget: number;
   subFish: SubFish[];
   rainLeft: number;
   nextRainAt: number;
@@ -208,6 +223,8 @@ export function Game() {
     boatX: 68,
     boatVx: 0,
     moveDir: 0,
+    facing: 1,
+    rainTarget: 0,
     subFish: createInitialSubFish(),
     rainLeft: 0,
     nextRainAt: 600,
@@ -314,7 +331,7 @@ export function Game() {
     const s = saveRef.current;
     const G = g.current;
     const night = dayInfo(G.t).isNight;
-    const castX = G.bobber?.x ?? G.boatX + 90;
+    const castX = G.bobber?.x ?? lookAheadX(G.boatX, G.facing);
     const castZone = getZoneAtX(castX).id;
     const activeBaitDef = s.activeBait ? BAITS.find((b) => b.id === s.activeBait && (s.baits[b.id] ?? 0) > 0) : null;
     const rareMult =
@@ -388,7 +405,7 @@ export function Game() {
     const value = idleMode.current ? Math.max(1, Math.round(baseValue * 0.5)) : baseValue;
 
     // Roll for Sunken Treasure Chest (higher in deep water & on Perfect Cast)
-    const castZone = getZoneAtX(G.bobber?.x ?? G.boatX + 90).id;
+    const castZone = getZoneAtX(G.bobber?.x ?? lookAheadX(G.boatX, G.facing)).id;
     const chestChance = (castZone === "abyss" ? 0.16 : castZone === "timber" ? 0.1 : 0.05) + (G.perfectCast ? 0.06 : 0);
     const hasChest = !idleMode.current && Math.random() < chestChance;
     const chestCoins = hasChest ? 25 + Math.floor(Math.random() * 65) + s0.level * 8 : 0;
@@ -558,7 +575,7 @@ export function Game() {
       } else {
         audio.current.play("cast");
       }
-      G.bobber = castTarget(G.boatX, pw);
+      G.bobber = castTarget(G.boatX, pw, G.facing);
       G.castT = 0;
       const z = getZoneAtX(G.bobber.x);
       setSonarInfo({ zoneName: z.name, depth: getDepthAtX(G.bobber.x) });
@@ -595,10 +612,12 @@ export function Game() {
       } else if (e.code === "KeyW" || e.code === "ArrowUp") {
         e.preventDefault();
         if (!e.repeat) jigLure();
-      } else if ((e.code === "KeyA" || e.code === "ArrowLeft") && phaseRef.current === "idle" && !panelRef.current) {
-        g.current.moveDir = -1;
-      } else if ((e.code === "KeyD" || e.code === "ArrowRight") && phaseRef.current === "idle" && !panelRef.current) {
-        g.current.moveDir = 1;
+      } else if ((e.code === "KeyA" || e.code === "ArrowLeft") && !panelRef.current) {
+        if (phaseRef.current === "idle" || phaseRef.current === "charging") g.current.facing = -1;
+        if (phaseRef.current === "idle") g.current.moveDir = -1;
+      } else if ((e.code === "KeyD" || e.code === "ArrowRight") && !panelRef.current) {
+        if (phaseRef.current === "idle" || phaseRef.current === "charging") g.current.facing = 1;
+        if (phaseRef.current === "idle") g.current.moveDir = 1;
       } else if (e.code === "Escape") {
         setPanel((p) => (p ? null : "pause"));
       } else if (e.code === "KeyS") {
@@ -661,8 +680,9 @@ export function Game() {
         // Boat horizontal movement in idle phase
         if (p === "idle" && G.moveDir !== 0) {
           const maxSpeed = 28 + s.boat * 14;
+          G.facing = G.moveDir;
           G.boatVx = G.moveDir * maxSpeed;
-          G.boatX = Math.max(38, Math.min(195, G.boatX + G.boatVx * dt));
+          G.boatX = Math.max(BOAT_MIN_X, Math.min(BOAT_MAX_X, G.boatX + G.boatVx * dt));
         } else {
           G.boatVx *= Math.max(0, 1 - dt * 8);
         }
@@ -694,7 +714,7 @@ export function Game() {
           if ((p === "idle" || p === "caught" || p === "escaped") && performance.now() >= idleRecastAt.current) {
             reset();
             G.power = 0.65;
-            G.bobber = castTarget(G.boatX, 0.65);
+            G.bobber = castTarget(G.boatX, 0.65, G.facing);
             G.castT = 0;
             audio.current.play("cast");
             setPhase("casting");
@@ -706,22 +726,27 @@ export function Game() {
 
         // Dynamic Weather & World Events
         if (startedRef.current) {
+          // Rain intensity eases toward its target: drizzle -> shower on the way in, taper on the way out
+          if (G.rain < G.rainTarget) G.rain = Math.min(G.rainTarget, G.rain + dt / RAIN_FADE_IN);
+          else if (G.rain > G.rainTarget) G.rain = Math.max(G.rainTarget, G.rain - dt / RAIN_FADE_OUT);
+
+          if (G.rain > 0.02) {
+            G.nextRainDropAt -= dt;
+            if (G.nextRainDropAt <= 0) {
+              audio.current.play("droplet");
+              // Sparse plinks while drizzling, rapid patter at full intensity
+              G.nextRainDropAt = (0.35 + Math.random() * 0.8) / Math.max(0.25, G.rain);
+            }
+          }
+
           if (G.weather !== "clear") {
             G.weatherLeft -= dt;
-            if (G.weather === "rain" || G.weather === "storm") {
-              G.nextRainDropAt -= dt;
-              if (G.nextRainDropAt <= 0) {
-                audio.current.play("droplet");
-                G.nextRainDropAt = 0.35 + Math.random() * 0.8;
-              }
-              if (G.weather === "storm" && Math.random() < dt * 0.08) {
-                G.lightningFlash = 1;
-              }
+            if (G.weather === "storm" && G.rain > 0.65 && Math.random() < dt * 0.08) {
+              G.lightningFlash = 1;
             }
             if (G.weatherLeft <= 0) {
               G.weather = "clear";
-              G.rain = 0;
-              audio.current.setRain(false);
+              G.rainTarget = 0;
               setWeatherState("clear");
               G.nextWeatherAt = 75 + Math.random() * 85;
             }
@@ -741,8 +766,7 @@ export function Game() {
               G.weather = nextW;
               G.weatherLeft = 55 + Math.random() * 45;
               const isR = nextW === "rain" || nextW === "storm";
-              G.rain = isR ? 1 : 0;
-              audio.current.setRain(isR);
+              G.rainTarget = isR ? 1 : 0;
               setWeatherState(nextW);
               flash(`${WEATHER_INFO[nextW].icon} ${WEATHER_INFO[nextW].label}: ${WEATHER_INFO[nextW].bonus}`);
             }
@@ -761,7 +785,7 @@ export function Game() {
             G.fishJump = 1.35;
             G.fishX = Math.random() < 0.38 ? 68 + Math.random() * 66 : 135 + Math.random() * 160;
             G.fishY = HORIZON + 5 + Math.random() * 20;
-            G.nextFishAt = G.rain ? 14 + Math.random() * 18 : 30 + Math.random() * 38;
+            G.nextFishAt = G.rain > 0.3 ? 14 + Math.random() * 18 : 30 + Math.random() * 38;
             window.setTimeout(() => audio.current.play("jump"), 1050);
           }
           G.nextSplashAt -= dt;
@@ -780,21 +804,21 @@ export function Game() {
           } else {
             G.nextBirdAt -= dt;
             if (G.nextBirdAt <= 0) {
-              if (!nowNight && !G.rain) {
+              if (!nowNight && G.rain < 0.15) {
                 G.birdT = 0;
                 G.birdDuration = 10 + Math.random() * 6;
                 G.birdFlock = Math.random() < 0.5 ? 1 : 0;
                 G.birdDir = Math.random() < 0.5 ? -1 : 1;
                 G.birdY = 15 + Math.random() * 32;
               }
-              G.nextBirdAt = nowNight || G.rain ? 10 + Math.random() * 12 : 24 + Math.random() * 38;
+              G.nextBirdAt = nowNight || G.rain >= 0.15 ? 10 + Math.random() * 12 : 24 + Math.random() * 38;
             }
           }
           if (G.meteorT >= 0) {
             G.meteorT += dt;
             const meteorX = G.meteorX + G.meteorT * 34;
             const meteorY = G.meteorY + G.meteorT * 36;
-            if (meteorY >= mountainLineY(meteorX, G.t) || G.meteorT > 3) G.meteorT = -1;
+            if (meteorY >= mountainLineY(meteorX) || G.meteorT > 3) G.meteorT = -1;
           } else if (nowNight) {
             G.nextMeteorAt -= dt;
             if (G.nextMeteorAt <= 0) {
@@ -830,7 +854,7 @@ export function Game() {
               ? BAITS.find((b) => b.id === s.activeBait && (s.baits[b.id] ?? 0) > 0)
               : null;
             const speedMult =
-              (G.rain ? 1.25 : 1) *
+              (1 + 0.25 * G.rain) *
               (G.weather === "storm" ? 1.2 : 1) *
               (G.perfectCast ? 1.25 : 1) *
               (1 + s.lure * 0.08) *
@@ -964,8 +988,9 @@ export function Game() {
         const night = dayInfo(G.t).isNight;
         setIsNight(night);
         audio.current.setNight(night);
+        audio.current.setRainLevel(G.rain);
         if (phaseRef.current === "idle") {
-          const sampleX = G.boatX + 95;
+          const sampleX = lookAheadX(G.boatX, G.facing);
           const z = getZoneAtX(sampleX);
           setSonarInfo({ zoneName: z.name, depth: getDepthAtX(sampleX) });
         }
@@ -1744,6 +1769,7 @@ export function Game() {
               <button
                 className="tb-btn tb-nav-btn"
                 onPointerDown={() => {
+                  g.current.facing = -1;
                   g.current.moveDir = -1;
                 }}
                 onPointerUp={() => {
@@ -1759,6 +1785,7 @@ export function Game() {
               <button
                 className="tb-btn tb-nav-btn"
                 onPointerDown={() => {
+                  g.current.facing = 1;
                   g.current.moveDir = 1;
                 }}
                 onPointerUp={() => {

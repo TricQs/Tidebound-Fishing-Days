@@ -64,9 +64,16 @@ export class LakeAudio {
   }
 
   setRain(raining: boolean) {
+    this.setRainLevel(raining ? 1 : 0);
+  }
+
+  /** Rain ambience follows the visual intensity (0 = dry, 1 = full shower) so drizzle sounds soft. */
+  setRainLevel(level: number) {
     const ctx = this.ctx;
     const out = this.ambience;
     if (!ctx || !out) return;
+    const clamped = Math.max(0, Math.min(1, level));
+    const raining = clamped > 0.01;
     if (raining && !this.rainSource) {
       const buffer = ctx.createBuffer(1, ctx.sampleRate * 4, ctx.sampleRate);
       const data = buffer.getChannelData(0);
@@ -85,11 +92,14 @@ export class LakeAudio {
       low.type = "lowpass";
       low.frequency.value = 7200;
       gain.gain.setValueAtTime(0.0001, ctx.currentTime);
-      gain.gain.linearRampToValueAtTime(0.32, ctx.currentTime + 2.5);
       source.connect(high).connect(low).connect(gain).connect(out);
       source.start();
       this.rainSource = source;
       this.rainGain = gain;
+    }
+    if (raining && this.rainGain) {
+      // Quadratic curve keeps the first drizzle barely audible
+      this.rainGain.gain.setTargetAtTime(Math.max(0.0001, 0.32 * clamped * clamped), ctx.currentTime, 0.6);
     } else if (!raining && this.rainSource && this.rainGain) {
       const source = this.rainSource;
       this.rainGain.gain.setTargetAtTime(0.0001, ctx.currentTime, 0.7);

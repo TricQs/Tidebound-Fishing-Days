@@ -16,6 +16,7 @@ const mix = (a: RGB, b: RGB, t: number): RGB => [
   a[2] + (b[2] - a[2]) * t,
 ];
 const css = (c: RGB) => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
+const rgba = (c: RGB, a: number) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${Math.max(0, Math.min(1, a))})`;
 
 // keyframes: dawn, day, dusk, night
 const SKY_TOP = ["#3d5a80", "#4585b4", "#3b3561", "#081021"].map(hex);
@@ -43,13 +44,28 @@ const hash = (n: number) => {
   return x - Math.floor(x);
 };
 
-export function mountainLineY(x: number, t: number) {
-  const farX = x + t * 0.25,
-    nearX = x + t * 0.65;
-  const farY = 60 + Math.sin(farX * 0.03) * 11 + Math.sin(farX * 0.071 + 1) * 6 + Math.sin(farX * 0.013) * 8;
-  const nearY = 79 + Math.sin(nearX * 0.045 + 2) * 6 + Math.sin(nearX * 0.11) * 3;
-  return Math.min(farY, nearY);
+// The camera is anchored at the dock, so terrain is static (no time-based scrolling).
+const farRidgeY = (x: number) => 60 + Math.sin(x * 0.03) * 11 + Math.sin(x * 0.071 + 1) * 6 + Math.sin(x * 0.013) * 8;
+const farRidgeSlope = (x: number) =>
+  Math.cos(x * 0.03) * 0.33 + Math.cos(x * 0.071 + 1) * 0.426 + Math.cos(x * 0.013) * 0.104;
+const nearRidgeY = (x: number) => 79 + Math.sin(x * 0.045 + 2) * 6 + Math.sin(x * 0.11) * 3;
+const nearRidgeSlope = (x: number) => Math.cos(x * 0.045 + 2) * 0.27 + Math.cos(x * 0.11) * 0.33;
+
+export function mountainLineY(x: number) {
+  return Math.min(farRidgeY(x), nearRidgeY(x));
 }
+
+/** Lambert term for a ridge column lit by a point light (the sun) in screen space. */
+function ridgeDiffuse(x: number, y: number, slope: number, lx: number, ly: number) {
+  const nLen = Math.hypot(slope, 1);
+  const dx = lx - x,
+    dy = ly - y;
+  const lLen = Math.hypot(dx, dy) || 1;
+  return (slope * dx - dy) / (nLen * lLen);
+}
+
+const CABIN_X = 86;
+const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
 export interface SubFish {
   x: number;
@@ -74,6 +90,10 @@ export interface SceneState {
   wind?: number;
   boatX?: number;
   boatVx?: number;
+  /** 1 = angler faces right, -1 = faces left. */
+  facing?: number;
+  /** 0..1 eased storm darkness, so the sky does not snap when a storm ends. */
+  storm?: number;
   boatLevel?: number;
   rodLevel?: number;
   tension?: number;
@@ -155,11 +175,26 @@ function lineAboveRidge(
   }
 }
 
+/** Filled pixel disc (keeps the chunky pixel-art look for glows and flare ghosts). */
+function disc(ctx: CanvasRenderingContext2D, c: string, cx: number, cy: number, r: number) {
+  ctx.fillStyle = c;
+  const rr = r * r;
+  for (let y = -Math.ceil(r); y <= Math.ceil(r); y++) {
+    const span = rr - y * y;
+    if (span < 0) continue;
+    const half = Math.floor(Math.sqrt(span));
+    ctx.fillRect(Math.round(cx - half), Math.round(cy + y), half * 2 + 1, 1);
+  }
+}
+
 export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
   const { t } = st;
   const d = dayInfo(t);
   const weather: WeatherKind = st.weather ?? ((st.rain ?? 0) > 0 ? "rain" : "clear");
-  const isRaining = weather === "rain" || weather === "storm" || (st.rain ?? 0) > 0;
+  // Rain is a 0..1 intensity that ramps in (drizzle -> shower) and out
+  const rainAmt = clamp01(st.rain ?? (weather === "rain" || weather === "storm" ? 1 : 0));
+  const stormAmt = clamp01(st.storm ?? (weather === "storm" ? 1 : 0));
+  const isRaining = rainAmt > 0.3;
   const isFoggy = weather === "fog";
   const isBiolume = weather === "biolume";
 
@@ -173,8 +208,23 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     ctx.fillRect(0, Math.floor((b * HORIZON) / bands), W, Math.ceil(HORIZON / bands) + 1);
   }
 
-  const ridgeAt = (x: number) => mountainLineY(x, t);
+  const ridgeAt = mountainLineY;
   const night = d.i === 3 ? 1 - d.s : d.j === 3 ? d.s : 0;
+
+  // Sun / moon placement (needed early: terrain lighting follows the sun)
+  const ang = ((t % CYCLE) / CYCLE) * Math.PI * 2;
+  const sx = W / 2 - Math.cos(ang) * 130,
+    sy = 70 - Math.sin(ang + 0.3) * 50;
+  const moon = d.phase > 2.5 && d.phase < 3.95;
+  const mx = moon ? W - sx : sx;
+  const my = moon ? 28 + Math.abs(Math.sin(ang)) * 10 : sy;
+  // How strongly the sun lights the world: fades near the horizon, at night, and under rain/fog
+  const weatherDim = (1 - 0.75 * rainAmt) * (isFoggy ? 0.55 : 1);
+  const sunStrength = moon ? 0 : (1 - night) * clamp01((100 - sy) / 32) * weatherDim;
+  const sunLow = clamp01((sy - 24) / 50);
+  const sunCol: RGB = mix([255, 241, 205], [255, 148, 92], sunLow);
+  // Visibility of the sun disc above the ridge line (soft edge so bloom fades as it sets)
+  const sunVis = moon ? 0 : clamp01((ridgeAt(sx) - sy) / 7);
 
   // 2. Stars & Bioluminescent Aurora
   const starTwinkle = (k: number) =>
@@ -206,24 +256,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     }
   }
 
-  // 3. Distant bird silhouettes
-  if ((st.birdT ?? -1) >= 0 && !d.isNight && !isRaining) {
-    const duration = Math.max(1, st.birdDuration ?? 12);
-    const progress = Math.max(0, Math.min(1, (st.birdT ?? 0) / duration));
-    const dir = st.birdDir ?? 1;
-    const centerX = dir > 0 ? -12 + progress * (W + 24) : W + 12 - progress * (W + 24);
-    const count = st.birdFlock ? 5 : 1;
-    for (let i = 0; i < count; i++) {
-      const offset = st.birdFlock ? (i - 2) * 6 : 0;
-      const bx = centerX + offset;
-      const by = (st.birdY ?? 28) + Math.sin(progress * Math.PI * 2 + i * 0.5) * 1.2 + Math.abs(offset) * 0.35;
-      const wing = 2 + Math.floor((Math.sin(t * 7 + i) + 1) * 0.7);
-      line(ctx, d.isNight ? "#a3afbd" : "#425a65", bx - wing, by - 1, bx, by + 1);
-      line(ctx, d.isNight ? "#a3afbd" : "#425a65", bx, by + 1, bx + wing, by - 1);
-    }
-  }
-
-  // 4. Shooting star / Meteor
+  // 3. Shooting star / Meteor
   if ((st.meteorT ?? -1) >= 0 && d.isNight && !isRaining) {
     const elapsed = st.meteorT ?? 0;
     const sx0 = st.meteorX ?? 190,
@@ -235,13 +268,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     if (meteorY < ridgeAt(meteorX)) px(ctx, `rgba(255,255,243,${glow})`, meteorX, meteorY, 2, 1);
   }
 
-  // 5. Sun & Moon with atmospheric glow halo
-  const ang = ((t % CYCLE) / CYCLE) * Math.PI * 2;
-  const sx = W / 2 - Math.cos(ang) * 130,
-    sy = 70 - Math.sin(ang + 0.3) * 50;
-  const moon = d.phase > 2.5 && d.phase < 3.95;
-  const mx = moon ? W - sx : sx;
-  const my = moon ? 28 + Math.abs(Math.sin(ang)) * 10 : sy;
+  // 4. Sun & Moon with atmospheric glow halo
   const sc = moon ? "#f3ecd2" : "#ffd27a";
   // Soft outer halo
   for (let y = -10; y <= 10; y++) {
@@ -260,108 +287,228 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
         if ((x + 3) * (x + 3) + (y - 1) * (y - 1) <= 20 && x * x + y * y <= 36) px(ctx, "#d7cfb3", mx + x, my + y);
   }
 
-  // 6. Far Mountains with 3D sunlit ridges & snowcaps
+  // 5. Far Mountains — static ridges, lit per column by the travelling sun so lit faces sweep across the range
   const far = pick(MTN_FAR, d);
-  const farShade = mix(far, [10, 16, 30], 0.22);
+  const farShadeCol = mix(far, [10, 16, 30], 0.34);
+  const skyHaze = mix(bot, top, 0.15);
+  const quant = (v: number) => Math.round(v * 8) / 8; // pixel-art banding of the light ramp
   for (let x = 0; x < W; x++) {
-    const xx = x + t * 0.25;
-    const y = 60 + Math.sin(xx * 0.03) * 11 + Math.sin(xx * 0.071 + 1) * 6 + Math.sin(xx * 0.013) * 8;
-    const slope = Math.cos(xx * 0.03) * 0.33 + Math.cos(xx * 0.071 + 1) * 0.42;
-    const col = slope > 0 && !d.isNight ? mix(far, [255, 235, 205], 0.12) : slope < -0.15 ? farShade : far;
-    ctx.fillStyle = css(col);
-    ctx.fillRect(x, Math.round(y), 1, HORIZON - Math.round(y));
+    const y = farRidgeY(x);
+    const ry = Math.round(y);
+    const diff = quant(ridgeDiffuse(x, y, farRidgeSlope(x), sx, sy));
+    const lit = Math.max(0, diff) * sunStrength;
+    const shade = Math.max(0, -diff) * (0.3 + 0.7 * sunStrength);
+    const body = lit > 0 ? mix(far, sunCol, lit * 0.3) : mix(far, farShadeCol, shade);
+    const rim = lit > 0 ? mix(far, sunCol, Math.min(0.75, lit * 0.62)) : body;
+    const foot = mix(body, skyHaze, 0.3); // aerial perspective toward the base
+    ctx.fillStyle = css(rim);
+    ctx.fillRect(x, ry, 1, 3);
+    ctx.fillStyle = css(body);
+    ctx.fillRect(x, ry + 3, 1, 12);
+    ctx.fillStyle = css(foot);
+    ctx.fillRect(x, ry + 15, 1, Math.max(0, HORIZON - ry - 15));
     if (y < 57) {
-      px(ctx, d.isNight ? "rgba(95,115,145,0.28)" : "rgba(252,245,230,0.68)", x, y, 1, 2 + (x % 3 === 0 ? 1 : 0));
+      // Snowcaps pick up alpenglow on the sun side and cool blue on the shadow side
+      const snowBase = mix([246, 244, 238], [96, 114, 146], night);
+      const snow = lit > 0 ? mix(snowBase, sunCol, lit * 0.5) : mix(snowBase, [140, 160, 194], shade * 0.7);
+      const depth = 2 + (x % 3 === 0 ? 1 : 0) + Math.floor((57 - y) * 0.35);
+      px(ctx, css(snow), x, ry, 1, depth);
+    }
+    // Occasional glints on the brightest sunlit crests
+    if (lit > 0.55 && hash(x + 77) > 0.86 && Math.sin(t * 2.4 + x * 1.3) > 0.55) {
+      px(ctx, rgba([255, 250, 235], 0.75 * lit), x, ry, 1, 1);
     }
   }
 
-  // 7. Near Mountains & Distant Waterfall
-  const near = css(pick(MTN_NEAR, d));
-  ctx.fillStyle = near;
+  // 6. Near Mountains (static) & Distant Waterfall
+  const nearBase = pick(MTN_NEAR, d);
+  const nearShadeCol = mix(nearBase, [6, 10, 20], 0.36);
   for (let x = 0; x < W; x++) {
-    const xx = x + t * 0.65;
-    const y = 79 + Math.sin(xx * 0.045 + 2) * 6 + Math.sin(xx * 0.11) * 3;
-    ctx.fillRect(x, Math.round(y), 1, HORIZON - Math.round(y));
+    const y = nearRidgeY(x);
+    const ry = Math.round(y);
+    const diff = quant(ridgeDiffuse(x, y, nearRidgeSlope(x), sx, sy));
+    const lit = Math.max(0, diff) * sunStrength * 0.8;
+    const shade = Math.max(0, -diff) * (0.3 + 0.7 * sunStrength);
+    const body = lit > 0 ? mix(nearBase, sunCol, lit * 0.24) : mix(nearBase, nearShadeCol, shade);
+    const rim = lit > 0 ? mix(nearBase, sunCol, Math.min(0.6, lit * 0.5)) : body;
+    ctx.fillStyle = css(rim);
+    ctx.fillRect(x, ry, 1, 2);
+    ctx.fillStyle = css(body);
+    ctx.fillRect(x, ry + 2, 1, Math.max(0, HORIZON - ry - 2));
   }
-  // Distant mountain waterfall around x = 238
-  const wfX = 238 - ((t * 0.65) % W);
-  const wfScreenX = ((wfX % W) + W) % W;
-  if (wfScreenX > 60 && wfScreenX < W - 15) {
-    const wfTop = Math.round(81 + Math.sin((wfScreenX + t * 0.65) * 0.045 + 2) * 5);
-    for (let wy = wfTop; wy < HORIZON; wy++) {
-      const shimmer = (Math.floor(wy + t * 14) % 3) === 0;
-      px(
-        ctx,
-        d.isNight
-          ? shimmer
-            ? "rgba(150,195,220,0.45)"
-            : "rgba(95,140,175,0.3)"
-          : shimmer
-            ? "rgba(235,250,255,0.75)"
-            : "rgba(175,220,235,0.5)",
-        wfScreenX,
-        wy,
-        2,
-        1,
-      );
-    }
-    // Mist at waterfall base
-    px(ctx, "rgba(220,242,248,0.35)", wfScreenX - 2, HORIZON - 2, 6, 2);
-  }
+  // Low valley haze between the ranges and the treeline
+  const valleyHaze = ctx.createLinearGradient(0, HORIZON - 18, 0, HORIZON);
+  valleyHaze.addColorStop(0, rgba(skyHaze, 0));
+  valleyHaze.addColorStop(1, rgba(skyHaze, 0.26));
+  ctx.fillStyle = valleyHaze;
+  ctx.fillRect(0, HORIZON - 18, W, 18);
 
-  // 8. Shoreline Pine Forest & Cozy Distant Cabin
-  const pine = css(pick(PINE, d));
-  const pineLight = css(mix(pick(PINE, d), [90, 140, 110], d.isNight ? 0.05 : 0.18));
-  const off = (t * 1.1) % 7;
-  for (let i = -1; i < W / 7 + 2; i++) {
-    const seed = i + Math.floor((t * 1.1) / 7);
-    const h = 8 + hash(seed) * 13;
-    const cx = i * 7 - off + 3;
+  // Distant mountain waterfall (fixed at x = 238)
+  const wfScreenX = 238;
+  const wfTop = Math.round(nearRidgeY(wfScreenX)) + 2;
+  for (let wy = wfTop; wy < HORIZON; wy++) {
+    const shimmer = Math.floor(wy + t * 14) % 3 === 0;
+    px(
+      ctx,
+      d.isNight
+        ? shimmer
+          ? "rgba(150,195,220,0.45)"
+          : "rgba(95,140,175,0.3)"
+        : shimmer
+          ? "rgba(235,250,255,0.75)"
+          : "rgba(175,220,235,0.5)",
+      wfScreenX,
+      wy,
+      2,
+      1,
+    );
+  }
+  px(ctx, "rgba(220,242,248,0.35)", wfScreenX - 2, HORIZON - 2, 6, 2);
+
+  // 7. Shoreline Pine Forest (static) with a tiny cabin tucked between the trees
+  const pineBase = pick(PINE, d);
+  const pine = css(pineBase);
+  const pineLit = css(mix(pineBase, sunCol, 0.1 + 0.24 * sunStrength));
+  const pineDark = css(mix(pineBase, [4, 8, 14], 0.3));
+  const drawPine = (cx: number, h: number) => {
+    const litRight = sx > cx;
     for (let r = 0; r < h; r++) {
       const hw = Math.floor((r / h) * 3.6);
+      const yy = Math.round(HORIZON - h + r);
       ctx.fillStyle = pine;
-      ctx.fillRect(Math.round(cx - hw), Math.round(HORIZON - h + r), hw * 2 + 1, 1);
-      if (!d.isNight && r % 2 === 0 && hw > 0) {
-        ctx.fillStyle = pineLight;
-        ctx.fillRect(Math.round(cx - hw), Math.round(HORIZON - h + r), 1, 1);
+      ctx.fillRect(Math.round(cx - hw), yy, hw * 2 + 1, 1);
+      if (hw > 0 && r % 2 === 0) {
+        if (sunStrength > 0.05) {
+          ctx.fillStyle = pineLit;
+          ctx.fillRect(Math.round(litRight ? cx + hw : cx - hw), yy, 1, 1);
+        }
+        ctx.fillStyle = pineDark;
+        ctx.fillRect(Math.round(litRight ? cx - hw : cx + hw), yy, 1, 1);
       }
     }
+  };
+  for (let i = -1; i < W / 7 + 2; i++) {
+    const cx = i * 7 + 3;
+    if (cx > CABIN_X - 5 && cx < CABIN_X + 14) continue; // clearing around the cabin
+    drawPine(cx, 8 + hash(i) * 13);
   }
+  // Tall pine standing just behind the cabin roof
+  drawPine(CABIN_X + 2, 18);
+
+  // Cabin — small because it sits far across the lake
+  const cabWall = mix([112, 74, 46], [28, 21, 22], night * 0.85);
+  const cabRoof = mix([96, 48, 38], [24, 18, 24], night * 0.85);
+  const cabRoofLit = mix(cabRoof, sunCol, 0.3 * sunStrength);
+  const cabWallLit = mix(cabWall, sunCol, 0.18 * sunStrength);
+  const roofLitRight = sx > CABIN_X + 4;
+  // Stone chimney
+  px(ctx, css(mix([104, 100, 98], [30, 30, 36], night * 0.85)), CABIN_X + 6, HORIZON - 13, 2, 4);
+  // Gable roof rows (r = 0 is the ridge)
+  for (let r = 0; r < 5; r++) {
+    const ry = HORIZON - 10 + r;
+    const left = CABIN_X + 3 - r;
+    const w = 3 + 2 * r;
+    px(ctx, css(cabRoof), left, ry, w, 1);
+    px(ctx, css(cabRoofLit), roofLitRight ? CABIN_X + 4 : left, ry, Math.ceil(w / 2), 1);
+  }
+  // Walls, sun-facing wall slightly warmer
+  px(ctx, css(cabWall), CABIN_X, HORIZON - 5, 9, 4);
+  px(ctx, css(cabWallLit), roofLitRight ? CABIN_X + 5 : CABIN_X, HORIZON - 5, 4, 4);
+  px(ctx, css(mix(cabWall, [10, 8, 8], 0.5)), CABIN_X + 5, HORIZON - 4, 2, 3); // door
+  const cabinLit = d.isNight || d.i === 2 || isRaining;
+  if (cabinLit) {
+    const winFlicker = 0.85 + 0.15 * Math.sin(t * 5);
+    px(ctx, `rgba(255,190,90,${0.22 * winFlicker})`, CABIN_X, HORIZON - 5, 4, 3);
+    px(ctx, `rgba(255,212,120,${winFlicker})`, CABIN_X + 1, HORIZON - 4, 2, 1);
+  } else {
+    px(ctx, "#2b3a44", CABIN_X + 1, HORIZON - 4, 2, 1);
+  }
+  // Foreground pines framing the cabin
+  drawPine(CABIN_X - 4, 11);
+  drawPine(CABIN_X + 13, 14);
   ctx.fillStyle = pine;
   ctx.fillRect(0, HORIZON - 2, W, 2);
 
-  // Cozy shoreline cabin on the distant bank (x ~ 18)
-  const cabX = 14,
-    cabY = HORIZON - 9;
-  px(ctx, d.isNight ? "#1a1412" : "#4a3222", cabX, cabY + 3, 12, 6);
-  line(ctx, d.isNight ? "#0d131a" : "#2b1d14", cabX - 1, cabY + 3, cabX + 6, cabY - 1);
-  line(ctx, d.isNight ? "#0d131a" : "#2b1d14", cabX + 13, cabY + 3, cabX + 6, cabY - 1);
-  // Cabin warm window at night/dusk/rain
-  if (d.isNight || d.i === 2 || isRaining) {
-    const winFlicker = 0.85 + 0.15 * Math.sin(t * 5);
-    px(ctx, `rgba(255,205,105,${winFlicker})`, cabX + 3, cabY + 5, 2, 2);
-    px(ctx, `rgba(255,205,105,${winFlicker * 0.85})`, cabX + 7, cabY + 5, 2, 2);
-  }
-  // Chimney smoke
-  for (let sm = 0; sm < 5; sm++) {
-    const smAge = ((t * 1.4 + sm * 0.8) % 4) / 4;
-    const smX = cabX + 9 + smAge * 5 + Math.sin(t * 2 + sm) * 1;
-    const smY = cabY - 1 - smAge * 10;
-    px(ctx, `rgba(215,225,230,${(1 - smAge) * 0.35})`, smX, smY, 2, 2);
+  // Chimney smoke: puffs rise, swell, curl and drift with the breeze before fading out
+  const smokeCol = mix([222, 226, 230], [86, 96, 112], night * 0.8);
+  const chimX = CABIN_X + 7,
+    chimY = HORIZON - 14;
+  for (let sm = 0; sm < 10; sm++) {
+    const age = (t * 0.15 + sm / 10) % 1;
+    const sxp = chimX + age * age * 16 + Math.sin(t * 0.9 + sm * 1.7) * (0.4 + age * 2.4);
+    const syp = chimY - age * 30;
+    const size = 0.8 + age * 3.4;
+    const fadeIn = age < 0.1 ? age / 0.1 : 1;
+    const a = fadeIn * (1 - age) * 0.42 * (1 - rainAmt * 0.5);
+    disc(ctx, rgba(smokeCol, a), sxp, syp, size);
   }
 
-  // 9. Clouds with volume shading
-  for (let i = 0; i < 4; i++) {
+  // 8. Clouds with volume shading (grey and thicken as the rain builds)
+  const cloudCount = 4 + Math.ceil(rainAmt * 4);
+  for (let i = 0; i < cloudCount; i++) {
     const width = 24 + hash(i + 1700) * 26;
     const x = ((hash(i + 1750) * (W + width) + t * (0.9 + i * 0.22)) % (W + width)) - width;
     const y = 20 + hash(i + 1800) * 28;
-    const cloud = d.isNight ? "rgba(28,42,66,0.72)" : "rgba(242,246,238,0.66)";
-    const cloudShade = d.isNight ? "rgba(17,27,45,0.5)" : "rgba(176,198,204,0.34)";
+    const fade = i < 4 ? 1 : clamp01((rainAmt - (i - 4) * 0.15) * 4);
+    const cloudRgb: RGB = d.isNight ? mix([28, 42, 66], [22, 30, 44], rainAmt) : mix([242, 246, 238], [146, 156, 168], rainAmt);
+    const shadeRgb: RGB = d.isNight ? [17, 27, 45] : mix([176, 198, 204], [108, 118, 132], rainAmt);
+    const cloud = rgba(cloudRgb, (d.isNight ? 0.72 : 0.66 + rainAmt * 0.18) * fade);
+    const cloudShade = rgba(shadeRgb, (d.isNight ? 0.5 : 0.34 + rainAmt * 0.2) * fade);
     px(ctx, cloudShade, x + 2, y + 5, width, 2);
     px(ctx, cloud, x + 4, y + 2, width - 8, 3);
     px(ctx, cloud, x, y + 4, width, 3);
     px(ctx, cloud, x + 6, y, 9, 4);
     px(ctx, cloud, x + width * 0.55, y + 1, 11, 3);
+    // Sun-kissed top edges
+    if (sunStrength > 0.05) {
+      const rim = rgba(sunCol, 0.3 * sunStrength * fade);
+      px(ctx, rim, x + 6, y, 9, 1);
+      px(ctx, rim, x + width * 0.55, y + 1, 11, 1);
+    }
+  }
+
+  // 9. Small sun bloom & subtle lens flare (after clouds so it softly glows through them)
+  const bloomK = sunVis * (1 - night) * weatherDim;
+  if (bloomK > 0.01) {
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const bloom = ctx.createRadialGradient(mx, my, 3, mx, my, 22);
+    bloom.addColorStop(0, rgba(sunCol, 0.26 * bloomK));
+    bloom.addColorStop(0.35, rgba(sunCol, 0.09 * bloomK));
+    bloom.addColorStop(1, rgba(sunCol, 0));
+    ctx.fillStyle = bloom;
+    ctx.fillRect(mx - 22, my - 22, 44, 44);
+    disc(ctx, `rgba(255,250,235,${0.3 * bloomK})`, mx, my, 4);
+
+    // Subtle small sun flare: tiny glint rays + soft lens ghosts toward scene center
+    const shimmer = 0.85 + 0.15 * Math.sin(t * 2.1);
+    const rayAlpha = 0.22 * bloomK * shimmer;
+    px(ctx, rgba([255, 252, 240], rayAlpha), mx - 9, my, 19, 1);
+    px(ctx, rgba([255, 252, 240], rayAlpha * 0.85), mx, my - 8, 1, 17);
+    const fvx = W * 0.5 - mx;
+    const fvy = HORIZON * 0.58 - my;
+    disc(ctx, rgba([255, 225, 165], 0.11 * bloomK * shimmer), mx + fvx * 0.38, my + fvy * 0.38, 2.2);
+    disc(ctx, rgba([185, 240, 225], 0.09 * bloomK * shimmer), mx + fvx * 0.68, my + fvy * 0.68, 1.5);
+    disc(ctx, rgba([255, 195, 145], 0.08 * bloomK * shimmer), mx + fvx * 0.95, my + fvy * 0.95, 3.0);
+    ctx.restore();
+  }
+
+  // 9b. Bird silhouettes — drawn after clouds and the sun so they fly in front of both
+  if ((st.birdT ?? -1) >= 0 && !d.isNight && rainAmt < 0.3) {
+    const duration = Math.max(1, st.birdDuration ?? 12);
+    const progress = clamp01((st.birdT ?? 0) / duration);
+    const dir = st.birdDir ?? 1;
+    const centerX = dir > 0 ? -12 + progress * (W + 24) : W + 12 - progress * (W + 24);
+    const count = st.birdFlock ? 5 : 1;
+    const birdCol = rgba([40, 56, 66], 1 - rainAmt * 2);
+    for (let i = 0; i < count; i++) {
+      const offset = st.birdFlock ? (i - 2) * 6 : 0;
+      const bx = centerX + offset;
+      const by = (st.birdY ?? 28) + Math.sin(progress * Math.PI * 2 + i * 0.5) * 1.2 + Math.abs(offset) * 0.35;
+      const wing = 2 + Math.floor((Math.sin(t * 7 + i) + 1) * 0.7);
+      line(ctx, birdCol, bx - wing, by - 1, bx, by + 1);
+      line(ctx, birdCol, bx, by + 1, bx + wing, by - 1);
+    }
   }
 
   // 10. Water surface with Horizontal Bathymetry (Shallows -> Deep Trench)
@@ -386,13 +533,14 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
   ctx.fillStyle = bathyGrad;
   ctx.fillRect(0, HORIZON, W, H - HORIZON);
 
-  // Underwater sunbeams / god rays in daytime
-  if (!d.isNight && !isRaining) {
+  // Underwater sunbeams / god rays in daytime (fade out as rain builds)
+  if (!d.isNight && rainAmt < 0.95) {
+    const rayK = 1 - rainAmt;
     for (let r = 0; r < 4; r++) {
       const rx = 65 + r * 62 + Math.sin(t * 0.4 + r) * 8;
       for (let dy = 2; dy < 42; dy += 2) {
         const rw = Math.max(1, 5 - Math.floor(dy / 10));
-        px(ctx, `rgba(190,240,235,${0.065 * (1 - dy / 42)})`, rx + dy * 0.35, HORIZON + dy, rw, 2);
+        px(ctx, `rgba(190,240,235,${0.065 * rayK * (1 - dy / 42)})`, rx + dy * 0.35, HORIZON + dy, rw, 2);
       }
     }
   }
@@ -415,10 +563,10 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     }
   }
 
-  // Cabin window reflection on left water
-  if (d.isNight || d.i === 2) {
+  // Cabin window reflection on the water below the treeline
+  if (cabinLit) {
     for (let k = 0; k < 4; k++) {
-      px(ctx, "rgba(255,195,95,0.18)", cabX + 4 + Math.sin(t * 3 + k) * 1.5, HORIZON + 3 + k * 2, 4 - k * 0.5, 1);
+      px(ctx, "rgba(255,195,95,0.16)", CABIN_X + Math.sin(t * 3 + k) * 1.5, HORIZON + 2 + k * 2, 3 - k * 0.5, 1);
     }
   }
 
@@ -577,10 +725,12 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     }
   }
 
-  // 14. Boat & Angler (Movable across the lake + Upgradable Boat Tiers!)
+  // 14. Boat & Angler (Movable left/right across the lake + directional facing & casting!)
   const boatLevel = st.boatLevel ?? 0;
   const bx = Math.round(st.boatX ?? 70);
   const boatVx = st.boatVx ?? 0;
+  const facing = (st.facing ?? 1) < 0 ? -1 : 1;
+  const mxBoat = (dx: number, w = 1) => (facing > 0 ? bx + dx : bx + 60 - dx - w);
   const by = 130 + Math.round(Math.sin(t * 1.5 + bx * 0.05) * 1);
   const hull =
     boatLevel >= 3
@@ -594,10 +744,10 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
   const ax = bx + 30,
     ay = by,
     waterline = by + 5;
-  const rodTipX = ax + 20,
+  const rodTipX = ax + facing * 20,
     rodTipY = ay - 26;
 
-  // Boat Wake ripples when moving
+  // Boat Wake ripples when moving left or right
   if (Math.abs(boatVx) > 1.5) {
     const wakeX = boatVx > 0 ? bx - 6 : bx + 62;
     for (let w = 0; w < 4; w++) {
@@ -625,8 +775,8 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     );
   }
   px(ctx, "#18333a", ax - 4, 2 * waterline - (ay - 10), 9, 8);
-  px(ctx, "#223b43", ax - 4, 2 * waterline - (ay - 15), 7, 5);
-  px(ctx, "#2d3b46", ax - 4, 2 * waterline - (ay - 17), 10, 2);
+  px(ctx, "#223b43", facing > 0 ? ax - 4 : ax - 3, 2 * waterline - (ay - 15), 7, 5);
+  px(ctx, "#2d3b46", facing > 0 ? ax - 4 : ax - 5, 2 * waterline - (ay - 17), 10, 2);
   for (let r = 0; r < 4; r++)
     px(
       ctx,
@@ -638,32 +788,33 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     );
   ctx.restore();
 
-  // Boat Canopy / Steam Launch Superstructure (behind or around angler)
+  // Boat Canopy / Steam Launch Superstructure (mirrors with boat facing)
   if (boatLevel === 2) {
     // Canopy supports
-    line(ctx, "#4a2c18", bx + 8, by, bx + 10, by - 22);
-    line(ctx, "#4a2c18", bx + 44, by, bx + 42, by - 22);
+    line(ctx, "#4a2c18", mxBoat(8), by, mxBoat(10), by - 22);
+    line(ctx, "#4a2c18", mxBoat(44), by, mxBoat(42), by - 22);
     // Striped Canopy Roof
-    px(ctx, "#d96b43", bx + 6, by - 24, 40, 3);
-    for (let cx = bx + 8; cx < bx + 44; cx += 6) {
-      px(ctx, "#f4e8c1", cx, by - 24, 3, 3);
+    px(ctx, "#d96b43", mxBoat(6, 40), by - 24, 40, 3);
+    for (let dx = 8; dx < 44; dx += 6) {
+      px(ctx, "#f4e8c1", mxBoat(dx, 3), by - 24, 3, 3);
     }
   } else if (boatLevel >= 3) {
-    // Steam Launch Cabin & Brass Smokestack
-    px(ctx, "#2b3a4a", bx + 6, by - 14, 18, 14);
-    px(ctx, "#d4a359", bx + 5, by - 15, 20, 2);
+    // Steam Launch Cabin & Brass Smokestack at stern
+    px(ctx, "#2b3a4a", mxBoat(6, 18), by - 14, 18, 14);
+    px(ctx, "#d4a359", mxBoat(5, 20), by - 15, 20, 2);
     // Glowing cabin porthole
-    px(ctx, lanternOn ? "#ffd166" : "#a8dadc", bx + 12, by - 9, 5, 4);
+    px(ctx, lanternOn ? "#ffd166" : "#a8dadc", mxBoat(12, 5), by - 9, 5, 4);
     // Brass smokestack
-    px(ctx, "#c98a3b", bx + 13, by - 24, 4, 9);
-    px(ctx, "#e6b86a", bx + 12, by - 25, 6, 2);
-    // Steam puffs
+    px(ctx, "#c98a3b", mxBoat(13, 4), by - 24, 4, 9);
+    px(ctx, "#e6b86a", mxBoat(12, 6), by - 25, 6, 2);
+    // Steam puffs drifting toward stern
+    const stackX = mxBoat(13, 3);
     for (let sp = 0; sp < 4; sp++) {
       const spAge = ((t * 1.8 + sp * 0.7) % 3) / 3;
       px(
         ctx,
         `rgba(240,246,250,${(1 - spAge) * 0.45})`,
-        bx + 13 - spAge * 8 - boatVx * 0.08,
+        stackX - facing * spAge * 8 - boatVx * 0.08,
         by - 27 - spAge * 9,
         3,
         2,
@@ -683,14 +834,14 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
       1,
     );
   }
-  px(ctx, boatLevel >= 3 ? "#f0c87a" : "#e2a85c", bx + 2, by + 3, 52, 1);
+  px(ctx, boatLevel >= 3 ? "#f0c87a" : "#e2a85c", mxBoat(2, 52), by + 3, 52, 1);
 
-  // Boat Bow Lantern (for boatLevel >= 1 or night time)
+  // Boat Bow Lantern (mounted at the front bow in the direction the boat faces)
   const hasBoatLantern = boatLevel >= 1 || d.isNight;
   if (hasBoatLantern) {
-    const lx = bx + 57,
+    const lx = mxBoat(57, 2),
       ly = by - 5;
-    line(ctx, "#4a2c18", bx + 54, by, lx, ly);
+    line(ctx, "#4a2c18", mxBoat(54, 1), by, lx + (facing < 0 ? 1 : 0), ly);
     px(ctx, lanternOn ? "#ffd166" : "#94a3b8", lx, ly, 2, 3);
     if (lanternOn) {
       const bGlow = 0.25 + 0.05 * Math.sin(t * 7);
@@ -711,64 +862,68 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     }
   }
 
-  // Angler (seated, with breathing, wind-blown scarf & dynamic posture)
+  // Angler (seated, facing left or right with breathing, wind-blown scarf & dynamic posture)
   const pull =
     st.phase === "reeling"
       ? Math.round(Math.sin(t * 22) * 1.4) - (st.fishPulling ? 1 : 0)
       : 0;
   const breath = Math.sin(t * 2.2) > 0.3 ? -1 : 0;
-  px(ctx, "#2c5c6a", ax - 4 - (st.phase === "reeling" ? 1 : 0), ay - 10 + breath, 9, 10 - breath); // coat
+  const lean = st.phase === "reeling" ? -facing : 0;
+  px(ctx, "#2c5c6a", ax - 4 + lean, ay - 10 + breath, 9, 10 - breath); // coat
   px(ctx, "#1f4450", ax - 4, ay - 3, 9, 3);
-  px(ctx, "#f2c9a0", ax - 2, ay - 15 + breath, 6, 5); // face
-  px(ctx, "#1b2533", ax + 2, ay - 13 + breath, 1, 1); // eye
+  px(ctx, "#f2c9a0", facing > 0 ? ax - 2 : ax - 3, ay - 15 + breath, 6, 5); // face
+  px(ctx, "#1b2533", facing > 0 ? ax + 2 : ax - 2, ay - 13 + breath, 1, 1); // eye
   // Hat
-  px(ctx, "#e0a24a", ax - 4, ay - 17 + breath, 10, 2);
-  px(ctx, "#c8862f", ax - 2, ay - 19 + breath, 6, 2);
-  px(ctx, "#a2442f", ax - 4, ay - 16 + breath, 10, 1);
+  const hatBrimX = facing > 0 ? ax - 4 : ax - 5;
+  const hatCrownX = facing > 0 ? ax - 2 : ax - 3;
+  px(ctx, "#e0a24a", hatBrimX, ay - 17 + breath, 10, 2);
+  px(ctx, "#c8862f", hatCrownX, ay - 19 + breath, 6, 2);
+  px(ctx, "#a2442f", hatBrimX, ay - 16 + breath, 10, 1);
   // Wind-blown red scarf tail behind angler
   const scarfWave = Math.round(Math.sin(t * 6) * 1.2);
-  px(ctx, "#c94a38", ax - 6, ay - 10 + breath, 3, 2);
-  px(ctx, "#a23828", ax - 8, ay - 10 + breath + scarfWave, 2, 1);
+  px(ctx, "#c94a38", facing > 0 ? ax - 6 : ax + 4, ay - 10 + breath, 3, 2);
+  px(ctx, "#a23828", facing > 0 ? ax - 8 : ax + 7, ay - 10 + breath + scarfWave, 2, 1);
 
   // Arm & Hand
-  const handX = ax + 6 + pull,
+  const handX = facing > 0 ? ax + 6 + pull : ax - 7 - pull,
     handY = ay - 7 + breath;
-  px(ctx, "#2c5c6a", ax + 3, ay - 8 + breath, 4, 2);
+  px(ctx, "#2c5c6a", facing > 0 ? ax + 3 : ax - 6, ay - 8 + breath, 4, 2);
   px(ctx, "#f2c9a0", handX, handY - 1, 2, 2);
 
-  // 15. Dynamic Curved Fishing Rod (bends realistically under tension!)
+  // 15. Dynamic Curved Fishing Rod (casts & bends left or right depending on facing!)
   const rodColors = ["#8a5a2b", "#a47138", "#c28342", "#64748b", "#7dd3fc", "#f472b6"];
   const rodColor = rodColors[Math.min(rodColors.length - 1, st.rodLevel ?? 0)]!;
   const tension = st.tension ?? 0;
+  const gripX = facing > 0 ? handX : handX + 1;
 
   let tipX = rodTipX,
     tipY = rodTipY;
-  let ctrlX = (handX + rodTipX) / 2,
+  let ctrlX = (gripX + rodTipX) / 2,
     ctrlY = (handY + rodTipY) / 2 - 3;
 
   if (st.phase === "charging") {
-    tipX = handX - 10 - st.power * 8;
+    tipX = gripX - facing * (10 + st.power * 8);
     tipY = rodTipY - 4 + st.power * 3;
-    ctrlX = handX - 4;
+    ctrlX = gripX - facing * 4;
     ctrlY = handY - 14;
   } else if (st.phase === "bite") {
-    tipX = rodTipX + 4;
+    tipX = rodTipX + facing * 4;
     tipY = rodTipY + 8;
-    ctrlX = handX + 10;
+    ctrlX = gripX + facing * 10;
     ctrlY = rodTipY - 2;
   } else if (st.phase === "reeling") {
     const bend = 4 + tension * 12 + (st.fishPulling ? 4 : 0);
-    tipX = rodTipX + 3 + Math.sin(t * 28) * (0.6 + tension);
+    tipX = rodTipX + facing * (3 + Math.sin(t * 28) * (0.6 + tension));
     tipY = rodTipY + bend;
-    ctrlX = handX + 11;
+    ctrlX = gripX + facing * 11;
     ctrlY = rodTipY - 4 + bend * 0.25;
   } else if ((st.jigAnim ?? 0) > 0) {
     tipY = rodTipY - 4;
   }
 
-  quadCurvePx(ctx, rodColor, handX, handY, ctrlX, ctrlY, tipX, tipY, 26);
+  quadCurvePx(ctx, rodColor, gripX, handY, ctrlX, ctrlY, tipX, tipY, 26);
   // Reel handle at grip
-  px(ctx, "#e0a24a", handX + 1, handY - 1, 2, 2);
+  px(ctx, "#e0a24a", facing > 0 ? handX + 1 : handX - 1, handY - 1, 2, 2);
 
   // "PERFECT CAST!" sparkle text above angler
   if ((st.perfectFlash ?? 0) > 0) {
@@ -793,14 +948,14 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
       const jigOffset = (st.jigAnim ?? 0) > 0 ? -1.8 : 0;
       byp += Math.round(Math.sin(t * 3) * 0.6 + nibbleOffset + jigOffset);
       if ((st.jigAnim ?? 0) > 0) {
-        bxp -= 1.5;
+        bxp -= facing * 1.5;
       }
     } else if (st.phase === "bite") {
       byp += 3 + Math.round(Math.abs(Math.sin(t * 18)) * 2.5);
     } else if (st.phase === "reeling") {
-      // As reelProgress goes 0 -> 1, the hooked fish is pulled closer to the boat!
+      // As reelProgress goes 0 -> 1, the hooked fish is pulled closer to the bow side of the boat!
       const prog = Math.max(0, Math.min(0.88, st.reelProgress ?? 0));
-      const targetX = bx + 68;
+      const targetX = facing > 0 ? bx + 68 : bx - 8;
       const targetY = waterline + 2;
       bxp = b.x + (targetX - b.x) * prog + Math.sin(t * (st.fishPulling ? 18 : 8)) * (st.fishPulling ? 5 : 2.5);
       byp = b.y + (targetY - b.y) * prog + Math.cos(t * 14) * 1.5;
@@ -931,39 +1086,50 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     }
   }
 
-  if (isRaining) {
-    ctx.fillStyle = weather === "storm" ? "rgba(12,22,38,0.26)" : "rgba(19,32,51,0.16)";
+  // Gradual Rain Transition: starts as a light drizzle (few short soft drops) and builds into full rain/storm
+  if (rainAmt > 0.01) {
+    const skyShade = (weather === "storm" ? 0.26 : 0.16) * rainAmt;
+    ctx.fillStyle = weather === "storm" ? `rgba(12,22,38,${skyShade})` : `rgba(19,32,51,${skyShade})`;
     ctx.fillRect(0, 0, W, HORIZON);
-    const dropCount = weather === "storm" ? 96 : 72;
+    const maxDrops = weather === "storm" ? 96 : 72;
+    // Ease-in drop count so early transition feels like a gentle drizzle
+    const dropCount = Math.max(2, Math.round(maxDrops * Math.pow(rainAmt, 1.35)));
+    const dropLen = 2.5 + rainAmt * 3.8;
+    const slantX = 0.8 + rainAmt * 2.2;
+    const alphaScale = 0.35 + 0.65 * rainAmt;
     ctx.lineWidth = 1;
     for (let i = 0; i < dropCount; i++) {
       const startY = hash(i + 610) * 54;
       const impactY = HORIZON + 2 + hash(i + 710) * (H - HORIZON - 8);
-      const speed = (weather === "storm" ? 95 : 72) + hash(i + 810) * 84;
+      const baseSpd = weather === "storm" ? 95 : 72;
+      const speed = (baseSpd * (0.65 + 0.35 * rainAmt)) + hash(i + 810) * (54 + 30 * rainAmt);
       const travel = Math.max(0.18, (impactY - startY) / speed);
       const cycle = travel + 0.65;
       const age = (t + hash(i + 910) * cycle) % cycle;
-      const rawX = hash(i + 210) * W - t * (24 + hash(i + 410) * 28);
+      const rawX = hash(i + 210) * W - t * ((14 + 10 * rainAmt) + hash(i + 410) * (18 + 10 * rainAmt));
       const x0 = ((rawX % W) + W) % W;
       if (age < travel) {
         const y = startY + age * speed;
         if (y < impactY) {
-          ctx.strokeStyle = i % 4 === 0 ? "rgba(205,235,245,0.52)" : "rgba(175,215,232,0.32)";
+          ctx.strokeStyle =
+            i % 4 === 0
+              ? `rgba(205,235,245,${0.52 * alphaScale})`
+              : `rgba(175,215,232,${0.32 * alphaScale})`;
           ctx.beginPath();
-          ctx.moveTo(x0 + 3, y);
-          ctx.lineTo(x0, y + 6);
+          ctx.moveTo(x0 + slantX, y);
+          ctx.lineTo(x0, y + dropLen);
           ctx.stroke();
         }
       } else {
         const pulse = 1 - (age - travel) / 0.65;
-        const radius = 1 + (1 - pulse) * 3;
-        px(ctx, `rgba(225,244,250,${pulse * 0.65})`, x0 - radius, impactY, 2, 1);
-        px(ctx, `rgba(225,244,250,${pulse * 0.65})`, x0 + radius, impactY, 2, 1);
+        const radius = 1 + (1 - pulse) * (1.5 + 1.5 * rainAmt);
+        px(ctx, `rgba(225,244,250,${pulse * 0.65 * alphaScale})`, x0 - radius, impactY, 2, 1);
+        px(ctx, `rgba(225,244,250,${pulse * 0.65 * alphaScale})`, x0 + radius, impactY, 2, 1);
       }
     }
     const fog = ctx.createLinearGradient(0, HORIZON - 6, 0, HORIZON + 34);
-    fog.addColorStop(0, "rgba(190,213,222,0.015)");
-    fog.addColorStop(0.38, "rgba(190,213,222,0.14)");
+    fog.addColorStop(0, `rgba(190,213,222,${0.015 * rainAmt})`);
+    fog.addColorStop(0.38, `rgba(190,213,222,${0.14 * rainAmt})`);
     fog.addColorStop(1, "rgba(190,213,222,0)");
     ctx.fillStyle = fog;
     ctx.fillRect(0, HORIZON - 6, W, 40);
