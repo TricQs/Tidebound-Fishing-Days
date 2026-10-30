@@ -156,25 +156,6 @@ function quadCurvePx(
   }
 }
 
-function lineAboveRidge(
-  ctx: CanvasRenderingContext2D,
-  c: string,
-  x0: number,
-  y0: number,
-  x1: number,
-  y1: number,
-  ridgeAt: (x: number) => number,
-) {
-  const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0)) | 0;
-  ctx.fillStyle = c;
-  for (let k = 0; k <= n; k++) {
-    const u = n ? k / n : 0;
-    const x = Math.round(x0 + (x1 - x0) * u),
-      y = Math.round(y0 + (y1 - y0) * u);
-    if (y < ridgeAt(x)) ctx.fillRect(x, y, 1, 1);
-  }
-}
-
 /** Filled pixel disc (keeps the chunky pixel-art look for glows and flare ghosts). */
 function disc(ctx: CanvasRenderingContext2D, c: string, cx: number, cy: number, r: number) {
   ctx.fillStyle = c;
@@ -193,9 +174,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
   const weather: WeatherKind = st.weather ?? ((st.rain ?? 0) > 0 ? "rain" : "clear");
   // Rain is a 0..1 intensity that ramps in (drizzle -> shower) and out
   const rainAmt = clamp01(st.rain ?? (weather === "rain" || weather === "storm" ? 1 : 0));
-  const stormAmt = clamp01(st.storm ?? (weather === "storm" ? 1 : 0));
   const isRaining = rainAmt > 0.3;
-  const isFoggy = weather === "fog";
   const isBiolume = weather === "biolume";
 
   const top = pick(SKY_TOP, d),
@@ -211,20 +190,22 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
   const ridgeAt = mountainLineY;
   const night = d.i === 3 ? 1 - d.s : d.j === 3 ? d.s : 0;
 
-  // Sun / moon placement (needed early: terrain lighting follows the sun)
-  const ang = ((t % CYCLE) / CYCLE) * Math.PI * 2;
-  const sx = W / 2 - Math.cos(ang) * 130,
-    sy = 70 - Math.sin(ang + 0.3) * 50;
-  const moon = d.phase > 2.5 && d.phase < 3.95;
-  const mx = moon ? W - sx : sx;
-  const my = moon ? 28 + Math.abs(Math.sin(ang)) * 10 : sy;
-  // How strongly the sun lights the world: fades near the horizon, at night, and under rain/fog
-  const weatherDim = (1 - 0.75 * rainAmt) * (isFoggy ? 0.55 : 1);
-  const sunStrength = moon ? 0 : (1 - night) * clamp01((100 - sy) / 32) * weatherDim;
-  const sunLow = clamp01((sy - 24) / 50);
-  const sunCol: RGB = mix([255, 241, 205], [255, 148, 92], sunLow);
-  // Visibility of the sun disc above the ridge line (soft edge so bloom fades as it sets)
+  // Sun (phase 0..2) and Moon (phase 2..4) both rise from behind the left mountains (y = 93)
+  // and set behind the right mountains (y = 93) so neither ever pops in mid-sky.
+  const moon = d.isNight;
+  const uSun = clamp01(d.phase / 2);
+  const uMoon = clamp01((d.phase - 2) / 2);
+  const sx = 38 + uSun * (W - 76),
+    sy = 93 - Math.sin(uSun * Math.PI) * 73;
+  const mx = moon ? 38 + uMoon * (W - 76) : sx,
+    my = moon ? 93 - Math.sin(uMoon * Math.PI) * 71 : sy;
+
+  // How strongly the sun lights the world: fades when behind mountains, near horizon, at night, and under rain
+  const weatherDim = 1 - 0.75 * rainAmt;
   const sunVis = moon ? 0 : clamp01((ridgeAt(sx) - sy) / 7);
+  const sunStrength = moon ? 0 : (1 - night) * sunVis * clamp01((92 - sy) / 28) * weatherDim;
+  const sunLow = clamp01((sy - 24) / 48);
+  const sunCol: RGB = mix([255, 241, 205], [255, 148, 92], sunLow);
 
   // 2. Stars & Bioluminescent Aurora
   const starTwinkle = (k: number) =>
@@ -256,16 +237,17 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     }
   }
 
-  // 3. Shooting star / Meteor
+  // 3. Shooting star / Meteor (drawn before mountains so it passes naturally behind the mountain ridge)
   if ((st.meteorT ?? -1) >= 0 && d.isNight && !isRaining) {
     const elapsed = st.meteorT ?? 0;
     const sx0 = st.meteorX ?? 190,
       sy0 = st.meteorY ?? 15;
     const meteorX = sx0 + elapsed * 34,
       meteorY = sy0 + elapsed * 36;
-    const glow = Math.max(0.32, 0.95 - elapsed * 0.18);
-    lineAboveRidge(ctx, `rgba(255,247,224,${glow * 0.8})`, meteorX - 11, meteorY - 8, meteorX, meteorY, ridgeAt);
-    if (meteorY < ridgeAt(meteorX)) px(ctx, `rgba(255,255,243,${glow})`, meteorX, meteorY, 2, 1);
+    const glow = Math.max(0.24, 0.95 - elapsed * 0.16);
+    line(ctx, `rgba(255,247,224,${glow * 0.32})`, meteorX - 16, meteorY - 12, meteorX - 8, meteorY - 6);
+    line(ctx, `rgba(255,247,224,${glow * 0.78})`, meteorX - 8, meteorY - 6, meteorX, meteorY);
+    px(ctx, `rgba(255,255,243,${glow})`, meteorX, meteorY, 2, 1);
   }
 
   // 4. Sun & Moon with atmospheric glow halo
@@ -336,34 +318,58 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     ctx.fillStyle = css(body);
     ctx.fillRect(x, ry + 2, 1, Math.max(0, HORIZON - ry - 2));
   }
-  // Low valley haze between the ranges and the treeline
-  const valleyHaze = ctx.createLinearGradient(0, HORIZON - 18, 0, HORIZON);
-  valleyHaze.addColorStop(0, rgba(skyHaze, 0));
-  valleyHaze.addColorStop(1, rgba(skyHaze, 0.26));
-  ctx.fillStyle = valleyHaze;
-  ctx.fillRect(0, HORIZON - 18, W, 18);
-
-  // Distant mountain waterfall (fixed at x = 238)
-  const wfScreenX = 238;
-  const wfTop = Math.round(nearRidgeY(wfScreenX)) + 2;
+  // Distant mountain waterfall cascading downward through a rocky gorge (at x = 236)
+  const wfScreenX = 236;
+  const wfTop = Math.round(nearRidgeY(wfScreenX)) + 4;
+  const gorgeRock = css(mix(nearShadeCol, [8, 14, 24], 0.45));
+  // Subtle rocky cleft at the top lip of the falls
+  px(ctx, gorgeRock, wfScreenX - 1, wfTop - 1, 4, 2);
   for (let wy = wfTop; wy < HORIZON; wy++) {
-    const shimmer = Math.floor(wy + t * 14) % 3 === 0;
-    px(
-      ctx,
-      d.isNight
-        ? shimmer
-          ? "rgba(150,195,220,0.45)"
-          : "rgba(95,140,175,0.3)"
-        : shimmer
-          ? "rgba(235,250,255,0.75)"
-          : "rgba(175,220,235,0.5)",
-      wfScreenX,
-      wy,
-      2,
-      1,
-    );
+    const dropRatio = (wy - wfTop) / Math.max(1, HORIZON - wfTop);
+    const width = dropRatio > 0.62 ? 3 : 2;
+    const xLeft = wfScreenX - (width === 3 ? 1 : 0);
+    // Wet dark cliff rock flanking the chute
+    px(ctx, gorgeRock, xLeft - 1, wy, 1, 1);
+    px(ctx, gorgeRock, xLeft + width, wy, 1, 1);
+
+    // Subtract `t * speed` so water and foam streaks flow DOWNWARD (+y) as time advances
+    const waveA = Math.sin(wy * 0.55 - t * 16) > 0.15;
+    const waveB = Math.cos(wy * 0.85 - t * 23 + 1.2) > 0.35;
+    const baseWater = d.isNight ? "rgba(78,122,158,0.48)" : "rgba(145,198,218,0.58)";
+    const crestFoam = d.isNight ? "rgba(155,205,232,0.55)" : "rgba(238,252,255,0.82)";
+    px(ctx, baseWater, xLeft, wy, width, 1);
+    if (waveA) {
+      px(ctx, crestFoam, wfScreenX, wy, 1, 1);
+    }
+    if (waveB && width >= 2) {
+      px(ctx, crestFoam, wfScreenX + 1, wy, 1, 1);
+    }
+    // Small rock shelf mid-fall that kicks out a tiny side droplet
+    if (wy === wfTop + 9 || wy === wfTop + 16) {
+      px(ctx, gorgeRock, xLeft - 1, wy, 2, 1);
+      if (Math.sin(t * 14 + wy) > 0) {
+        px(ctx, crestFoam, xLeft + width, wy, 1, 1);
+      }
+    }
   }
-  px(ctx, "rgba(220,242,248,0.35)", wfScreenX - 2, HORIZON - 2, 6, 2);
+  // Animated plunge pool foam & soft mist at the base of the waterfall
+  const poolPulse = Math.sin(t * 8) * 0.6;
+  px(
+    ctx,
+    d.isNight ? "rgba(145,195,220,0.38)" : "rgba(230,248,255,0.62)",
+    wfScreenX - 1 + poolPulse * 0.4,
+    HORIZON - 1,
+    4,
+    1,
+  );
+  px(
+    ctx,
+    d.isNight ? "rgba(120,170,198,0.22)" : "rgba(215,242,250,0.34)",
+    wfScreenX - 2,
+    HORIZON - 2,
+    6,
+    1,
+  );
 
   // 7. Shoreline Pine Forest (static) with a tiny cabin tucked between the trees
   const pineBase = pick(PINE, d);
@@ -545,16 +551,16 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     }
   }
 
-  // Celestial water reflection
-  const celestialVisible = my < ridgeAt(mx);
-  if (celestialVisible) {
+  // Celestial water reflection (fades smoothly as the sun or moon rises/sets behind the mountains)
+  const celestialVis = clamp01((ridgeAt(mx) - my) / 7) * (1 - rainAmt * 0.7);
+  if (celestialVis > 0.02) {
     for (let k = 0; k < 14; k++) {
       const ry = HORIZON + 3 + k * 3;
       const wob = Math.sin(t * 2.2 + k * 1.7) * (2 + k * 0.14);
       const ww = Math.max(1, 13 - k + Math.round(Math.sin(t * 3 + k) * 2));
       px(
         ctx,
-        moon ? "rgba(216,226,238,0.21)" : "rgba(255,205,125,0.22)",
+        moon ? `rgba(216,226,238,${0.21 * celestialVis})` : `rgba(255,205,125,${0.22 * celestialVis})`,
         mx - ww / 2 + wob,
         ry,
         ww,
@@ -690,12 +696,26 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
   // Dock Post & Hanging Warm Lantern
   px(ctx, "#4a2b17", 29, dockY - 14, 2, 12);
   px(ctx, "#4a2b17", 29, dockY - 14, 5, 1);
-  const lanternOn = d.isNight || d.i === 2 || d.i === 0 || isRaining || isFoggy;
+  const lanternOn = d.isNight || d.i === 2 || d.i === 0 || isRaining;
   px(ctx, lanternOn ? "#ffd166" : "#8d99ae", 33, dockY - 12, 2, 3);
   if (lanternOn) {
     const lGlow = 0.22 + 0.05 * Math.sin(t * 6);
     for (let r = 1; r <= 6; r++) {
       px(ctx, `rgba(255,195,90,${lGlow * (1 - r / 7)})`, 34 - r, dockY - 11 - r * 0.5, r * 2, r * 2);
+    }
+    // Tiny 1-pixel moths (laron) fluttering & orbiting around the warm dock lantern
+    if (rainAmt < 0.85) {
+      const mothCount = rainAmt > 0.45 ? 2 : 4;
+      for (let m = 0; m < mothCount; m++) {
+        const orbit = t * (3.1 + m * 0.75) + m * 1.85;
+        const flutter = Math.sin(t * 15 + m * 3.7) * 0.85;
+        const rx = 2.6 + (m % 2) * 1.7 + Math.sin(t * 1.4 + m) * 0.7;
+        const ry = 1.6 + ((m + 1) % 2) * 1.1;
+        const laronX = 33.5 + Math.cos(orbit) * rx;
+        const laronY = dockY - 11 + Math.sin(orbit * 1.25 + m) * ry + flutter;
+        const wingAlpha = (0.55 + 0.45 * Math.sin(t * 22 + m * 4.1)) * (1 - rainAmt * 0.8);
+        px(ctx, `rgba(255,238,180,${wingAlpha})`, laronX, laronY, 1, 1);
+      }
     }
     // Lantern reflection on dockside water
     for (let k = 0; k < 5; k++) {
@@ -1075,22 +1095,43 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
     px(ctx, `rgba(245,252,255,${st.surfaceSplash})`, sx, sy - age * 3, 1, 2);
   }
 
-  // 17. Weather Overlays: Mystic Fog, Rain & Storm Lightning
-  if (isFoggy) {
-    for (let b = 0; b < 4; b++) {
-      const fy = HORIZON - 10 + b * 14;
-      const fx = ((t * (2.5 + b * 0.8) + b * 70) % (W + 120)) - 120;
-      ctx.fillStyle = d.isNight ? "rgba(65,85,110,0.16)" : "rgba(215,232,235,0.22)";
-      ctx.fillRect(0, fy, W, 10);
-      px(ctx, d.isNight ? "rgba(85,110,138,0.2)" : "rgba(235,245,248,0.28)", fx, fy + 2, 110, 5);
-    }
-  }
-
-  // Gradual Rain Transition: starts as a light drizzle (few short soft drops) and builds into full rain/storm
+  // 17. Weather Overlays: Gradual Rain & Smooth Rain-Only Mist (no blocky fog stripes)
   if (rainAmt > 0.01) {
-    const skyShade = (weather === "storm" ? 0.26 : 0.16) * rainAmt;
-    ctx.fillStyle = weather === "storm" ? `rgba(12,22,38,${skyShade})` : `rgba(19,32,51,${skyShade})`;
-    ctx.fillRect(0, 0, W, HORIZON);
+    // Smooth full-height overcast tint so there is no sharp seam at HORIZON
+    const skyShade = (weather === "storm" ? 0.25 : 0.15) * rainAmt;
+    const overcast = ctx.createLinearGradient(0, 0, 0, H);
+    const shadeRgb = weather === "storm" ? "12,22,38" : "19,32,51";
+    overcast.addColorStop(0, `rgba(${shadeRgb},${skyShade})`);
+    overcast.addColorStop(0.58, `rgba(${shadeRgb},${skyShade * 0.85})`);
+    overcast.addColorStop(1, `rgba(${shadeRgb},${skyShade * 0.45})`);
+    ctx.fillStyle = overcast;
+    ctx.fillRect(0, 0, W, H);
+
+    // Smooth atmospheric mist that only appears during rain (soft vertical gradient + radial clouds, no lines)
+    const mistRgb = d.isNight ? "95,120,145" : "195,218,228";
+    const mistGrad = ctx.createLinearGradient(0, HORIZON - 32, 0, HORIZON + 46);
+    mistGrad.addColorStop(0, `rgba(${mistRgb},0)`);
+    mistGrad.addColorStop(0.32, `rgba(${mistRgb},${(d.isNight ? 0.055 : 0.085) * rainAmt})`);
+    mistGrad.addColorStop(0.5, `rgba(${mistRgb},${(d.isNight ? 0.095 : 0.135) * rainAmt})`);
+    mistGrad.addColorStop(0.72, `rgba(${mistRgb},${(d.isNight ? 0.05 : 0.075) * rainAmt})`);
+    mistGrad.addColorStop(1, `rgba(${mistRgb},0)`);
+    ctx.fillStyle = mistGrad;
+    ctx.fillRect(0, HORIZON - 32, W, 78);
+
+    // Soft drifting radial mist puffs along the water surface (no hard edges)
+    for (let m = 0; m < 4; m++) {
+      const mRad = 52 + (m % 2) * 18;
+      const mxp = ((m * 95 + t * (2.2 + m * 0.45)) % (W + mRad * 2)) - mRad;
+      const myp = HORIZON - 2 + Math.sin(t * 0.4 + m * 1.7) * 5 + (m % 2) * 8;
+      const puff = ctx.createRadialGradient(mxp, myp, 2, mxp, myp, mRad);
+      const puffAlpha = (d.isNight ? 0.05 : 0.075) * rainAmt;
+      puff.addColorStop(0, `rgba(${mistRgb},${puffAlpha})`);
+      puff.addColorStop(0.55, `rgba(${mistRgb},${puffAlpha * 0.45})`);
+      puff.addColorStop(1, `rgba(${mistRgb},0)`);
+      ctx.fillStyle = puff;
+      ctx.fillRect(mxp - mRad, myp - mRad, mRad * 2, mRad * 2);
+    }
+
     const maxDrops = weather === "storm" ? 96 : 72;
     // Ease-in drop count so early transition feels like a gentle drizzle
     const dropCount = Math.max(2, Math.round(maxDrops * Math.pow(rainAmt, 1.35)));
@@ -1102,11 +1143,11 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
       const startY = hash(i + 610) * 54;
       const impactY = HORIZON + 2 + hash(i + 710) * (H - HORIZON - 8);
       const baseSpd = weather === "storm" ? 95 : 72;
-      const speed = (baseSpd * (0.65 + 0.35 * rainAmt)) + hash(i + 810) * (54 + 30 * rainAmt);
+      const speed = baseSpd * (0.65 + 0.35 * rainAmt) + hash(i + 810) * (54 + 30 * rainAmt);
       const travel = Math.max(0.18, (impactY - startY) / speed);
       const cycle = travel + 0.65;
       const age = (t + hash(i + 910) * cycle) % cycle;
-      const rawX = hash(i + 210) * W - t * ((14 + 10 * rainAmt) + hash(i + 410) * (18 + 10 * rainAmt));
+      const rawX = hash(i + 210) * W - t * (14 + 10 * rainAmt + hash(i + 410) * (18 + 10 * rainAmt));
       const x0 = ((rawX % W) + W) % W;
       if (age < travel) {
         const y = startY + age * speed;
@@ -1127,12 +1168,6 @@ export function drawScene(ctx: CanvasRenderingContext2D, st: SceneState) {
         px(ctx, `rgba(225,244,250,${pulse * 0.65 * alphaScale})`, x0 + radius, impactY, 2, 1);
       }
     }
-    const fog = ctx.createLinearGradient(0, HORIZON - 6, 0, HORIZON + 34);
-    fog.addColorStop(0, `rgba(190,213,222,${0.015 * rainAmt})`);
-    fog.addColorStop(0.38, `rgba(190,213,222,${0.14 * rainAmt})`);
-    fog.addColorStop(1, "rgba(190,213,222,0)");
-    ctx.fillStyle = fog;
-    ctx.fillRect(0, HORIZON - 6, W, 40);
   }
 
   if ((st.lightningFlash ?? 0) > 0) {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { drawScene, dayInfo, mountainLineY, W, H, HORIZON, type SceneState, type SubFish } from "./scene";
+import { drawScene, dayInfo, W, H, HORIZON, type SceneState, type SubFish } from "./scene";
 import {
   SPECIES,
   RARITY_COLOR,
@@ -180,6 +180,14 @@ export function Game() {
   const lastActivity = useRef(Date.now());
   const idleMode = useRef(false);
   const idleRecastAt = useRef(0);
+  const tabHidden = useRef(false);
+
+  const setIdleState = useCallback((active: boolean, notice = false) => {
+    idleMode.current = active;
+    setIdleActive(active);
+    setIdleNotice(active && notice);
+    audio.current.setMuted(active || tabHidden.current);
+  }, []);
 
   const g = useRef<G>({
     t: 60,
@@ -347,7 +355,7 @@ export function Game() {
       if (f.rare) w *= rareMult;
       if (f.night) w *= night || G.weather === "biolume" ? 3.8 : 0.15;
       if (f.rain) w *= G.weather === "rain" || G.weather === "storm" ? 2.8 : 0.65;
-      if (f.fog) w *= G.weather === "fog" ? 3.2 : 0.65;
+      if (f.fog) w *= G.weather === "rain" || G.weather === "storm" || G.weather === "fog" || night ? 2.8 : 0.65;
       return w;
     });
 
@@ -365,7 +373,7 @@ export function Game() {
     const activeBaitDef = s.activeBait ? BAITS.find((b) => b.id === s.activeBait && (s.baits[b.id] ?? 0) > 0) : null;
     let mutChance = 0.08 + s.lure * 0.035 + Math.min(0.1, s.streak * 0.015);
     if (G.perfectCast) mutChance += 0.06;
-    if (G.weather === "fog") mutChance *= 1.8;
+    if (G.weather === "rain" || G.weather === "storm" || G.weather === "fog") mutChance *= 1.65;
     if (G.weather === "biolume") mutChance *= 2.4;
     if (activeBaitDef) mutChance *= activeBaitDef.mutationMult;
 
@@ -375,7 +383,7 @@ export function Game() {
     const weights = pool.map((k) => {
       let w = MUTATIONS[k].odds;
       if (k === "luminescent" && (G.weather === "biolume" || dayInfo(G.t).isNight)) w *= 2.2;
-      if (k === "shadow" && G.weather === "fog") w *= 2.2;
+      if (k === "shadow" && (G.weather === "rain" || G.weather === "storm" || G.weather === "fog")) w *= 2.2;
       if (k === "celestial" && G.perfectCast) w *= 2.0;
       return w;
     });
@@ -585,14 +593,14 @@ export function Game() {
     }
   }, [flash, setPhase]);
 
-  // Keyboard & Pointer Activity
+  // Keyboard, Pointer & Tab Visibility Activity (auto-idle + auto-mute in background tabs)
   useEffect(() => {
     const pointerActivity = (e: PointerEvent) => {
       if (!startedRef.current || (e.button !== 0 && e.button !== 2)) return;
+      if ((e.target as HTMLElement | null)?.closest?.("[data-idle-toggle]")) return;
       lastActivity.current = Date.now();
-      idleMode.current = false;
-      setIdleActive(false);
-      setIdleNotice(false);
+      tabHidden.current = false;
+      setIdleState(false);
     };
     const down = (e: KeyboardEvent) => {
       if (
@@ -600,9 +608,8 @@ export function Game() {
         ["Space", "KeyS", "KeyJ", "KeyA", "KeyD", "KeyW", "ArrowLeft", "ArrowRight", "Escape"].includes(e.code)
       ) {
         lastActivity.current = Date.now();
-        idleMode.current = false;
-        setIdleActive(false);
-        setIdleNotice(false);
+        tabHidden.current = false;
+        setIdleState(false);
       }
       if (!startedRef.current) return;
 
@@ -638,35 +645,70 @@ export function Game() {
         if (g.current.moveDir > 0) g.current.moveDir = 0;
       }
     };
+    const onVisibility = () => {
+      const hidden = document.hidden;
+      tabHidden.current = hidden;
+      if (hidden) {
+        g.current.moveDir = 0;
+        g.current.isHoldingReel = false;
+        if (startedRef.current && !panelRef.current && !idleMode.current) {
+          setIdleState(true, true);
+          window.setTimeout(() => setIdleNotice(false), 3000);
+        } else {
+          audio.current.setMuted(true);
+        }
+      } else {
+        audio.current.setMuted(idleMode.current);
+      }
+    };
+    const onBlur = () => {
+      tabHidden.current = true;
+      g.current.moveDir = 0;
+      g.current.isHoldingReel = false;
+      if (startedRef.current && !panelRef.current && !idleMode.current) {
+        setIdleState(true, true);
+        window.setTimeout(() => setIdleNotice(false), 3000);
+      } else {
+        audio.current.setMuted(true);
+      }
+    };
+    const onFocus = () => {
+      tabHidden.current = document.hidden;
+      audio.current.setMuted(idleMode.current || tabHidden.current);
+    };
+
     window.addEventListener("pointerdown", pointerActivity);
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
     return () => {
       window.removeEventListener("pointerdown", pointerActivity);
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
     };
-  }, [actionDown, actionUp, jigLure]);
+  }, [actionDown, actionUp, jigLure, setIdleState]);
 
-  // Main 60FPS Game Loop
+  // Main 60FPS Game Loop + Background Tab Ticker (keeps simulation & idle fishing running when tab is hidden)
   useEffect(() => {
     const ctx = canvasRef.current?.getContext("2d");
     if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
     let raf = 0,
+      bgTimer = 0,
       last = performance.now(),
       hudCheck = 0;
 
-    const loop = (now: number) => {
-      const dt = Math.min(0.05, (now - last) / 1000);
-      last = now;
+    const stepSimulation = (dt: number) => {
       const G = g.current;
       const paused = panelRef.current !== null;
 
       if (startedRef.current && !paused && Date.now() - lastActivity.current >= 21000 && !idleMode.current) {
-        idleMode.current = true;
-        setIdleActive(true);
-        setIdleNotice(true);
+        setIdleState(true, true);
         window.setTimeout(() => setIdleNotice(false), 3000);
       }
 
@@ -709,9 +751,12 @@ export function Game() {
           }
         }
 
-        // Idle Auto-Fishing Mode
+        // Idle Auto-Fishing Mode (also continues seamlessly in background tabs)
         if (idleMode.current) {
-          if ((p === "idle" || p === "caught" || p === "escaped") && performance.now() >= idleRecastAt.current) {
+          if (
+            (p === "idle" || p === "charging" || p === "caught" || p === "escaped") &&
+            performance.now() >= idleRecastAt.current
+          ) {
             reset();
             G.power = 0.65;
             G.bobber = castTarget(G.boatX, 0.65, G.facing);
@@ -758,11 +803,9 @@ export function Game() {
               const nextW: WeatherKind =
                 nightNow && roll < 0.35
                   ? "biolume"
-                  : roll < 0.45
+                  : roll < 0.72
                     ? "rain"
-                    : roll < 0.75
-                      ? "fog"
-                      : "storm";
+                    : "storm";
               G.weather = nextW;
               G.weatherLeft = 55 + Math.random() * 45;
               const isR = nextW === "rain" || nextW === "storm";
@@ -816,15 +859,15 @@ export function Game() {
           }
           if (G.meteorT >= 0) {
             G.meteorT += dt;
-            const meteorX = G.meteorX + G.meteorT * 34;
             const meteorY = G.meteorY + G.meteorT * 36;
-            if (meteorY >= mountainLineY(meteorX) || G.meteorT > 3) G.meteorT = -1;
+            // Let the shooting star fall all the way behind the mountain ridge until its tail clears the horizon
+            if (meteorY - 16 >= HORIZON || G.meteorT > 3.2) G.meteorT = -1;
           } else if (nowNight) {
             G.nextMeteorAt -= dt;
             if (G.nextMeteorAt <= 0) {
               G.meteorT = 0;
-              G.meteorX = 36 + Math.random() * 230;
-              G.meteorY = 8 + Math.random() * 22;
+              G.meteorX = 36 + Math.random() * 210;
+              G.meteorY = 6 + Math.random() * 18;
               G.nextMeteorAt = 32 + Math.random() * 45;
             }
           } else {
@@ -980,8 +1023,6 @@ export function Game() {
         if (G.splash > 0) G.splash = Math.max(0, G.splash - dt * 2);
       }
 
-      drawScene(ctx, G);
-
       hudCheck += dt;
       if (hudCheck > 0.4) {
         hudCheck = 0;
@@ -989,18 +1030,49 @@ export function Game() {
         setIsNight(night);
         audio.current.setNight(night);
         audio.current.setRainLevel(G.rain);
+        audio.current.setMuted(idleMode.current || tabHidden.current || document.hidden);
         if (phaseRef.current === "idle") {
           const sampleX = lookAheadX(G.boatX, G.facing);
           const z = getZoneAtX(sampleX);
           setSonarInfo({ zoneName: z.name, depth: getDepthAtX(sampleX) });
         }
       }
+    };
+
+    const tick = (now: number) => {
+      const rawDt = Math.max(0, (now - last) / 1000);
+      last = now;
+      if (document.hidden || tabHidden.current) {
+        // When backgrounded, browsers throttle timers to ~1s; advance in 50ms sub-steps so game & idle fishing run at 1x speed
+        let remaining = Math.min(2.5, rawDt);
+        while (remaining > 0.001) {
+          const step = Math.min(0.05, remaining);
+          stepSimulation(step);
+          remaining -= step;
+        }
+      } else {
+        stepSimulation(Math.min(0.05, rawDt));
+        drawScene(ctx, g.current);
+      }
+    };
+
+    const loop = (now: number) => {
+      tick(now);
       raf = requestAnimationFrame(loop);
     };
 
     raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [finishCatch, flash, pickFish, reset, setPhase]);
+    bgTimer = window.setInterval(() => {
+      if (document.hidden || tabHidden.current) {
+        tick(performance.now());
+      }
+    }, 250);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearInterval(bgTimer);
+    };
+  }, [finishCatch, flash, pickFish, reset, setIdleState, setPhase]);
 
   // Shop, Bait & Aquarium Actions
   const sell = (ids: number[]) => {
@@ -1082,9 +1154,7 @@ export function Game() {
     reset();
     setPanel(null);
     setStarted(false);
-    idleMode.current = false;
-    setIdleActive(false);
-    setIdleNotice(false);
+    setIdleState(false);
   };
 
   const quest = QUESTS[save.quest];
@@ -1182,14 +1252,33 @@ export function Game() {
               <div
                 className={`tb-chip tb-idle-status ${idleNotice ? "tb-idle-notice" : "tb-idle-dim"}`}
                 aria-label="Idle Mode"
+                title="Idle Auto-Fishing Active (Audio Muted)"
               >
                 <span className="tb-idle-clock" aria-hidden="true">
                   <i />
                 </span>
-                {idleNotice && <span>Idle Mode</span>}
+                <span>{idleNotice ? "Idle Auto-Fishing · Muted" : "Idle · 🔇"}</span>
               </div>
             )}
             <div className="tb-hud-right">
+              <button
+                data-idle-toggle
+                className={`tb-btn tb-btn-sm ${idleActive ? "tb-btn-primary" : ""}`}
+                onClick={() => {
+                  const next = !idleMode.current;
+                  lastActivity.current = Date.now();
+                  if (next) {
+                    idleRecastAt.current = 0;
+                    setIdleState(true, true);
+                    window.setTimeout(() => setIdleNotice(false), 3000);
+                  } else {
+                    setIdleState(false);
+                  }
+                }}
+                title="Toggle Idle Auto-Fishing (mutes audio automatically)"
+              >
+                {idleActive ? "💤 Idle ON" : "💤 Idle"}
+              </button>
               <button className="tb-btn tb-btn-sm" onClick={() => setPanel("shop")}>
                 Dock <kbd>S</kbd>
               </button>
@@ -1348,9 +1437,7 @@ export function Game() {
                 onClick={() => {
                   audio.current.start();
                   lastActivity.current = Date.now();
-                  idleMode.current = false;
-                  setIdleActive(false);
-                  setIdleNotice(false);
+                  setIdleState(false);
                   setStarted(true);
                 }}
                 disabled={!loaded}
@@ -1445,9 +1532,7 @@ export function Game() {
                       onClick={() => {
                         setPanel(null);
                         setStarted(false);
-                        idleMode.current = false;
-                        setIdleActive(false);
-                        setIdleNotice(false);
+                        setIdleState(false);
                       }}
                     >
                       Title screen
